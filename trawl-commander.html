@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en-US">
+  <head>
+    <meta charset="utf-8" />
+    <title>Krill Commander</title>
+    <style>
+      * {
+        padding: 0;
+        margin: 0;
+      }
+      canvas {
+        background: #eee;
+        display: block;
+        margin: 0 auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Krill Commander</h1>
+    <canvas id="myCanvas" width="960" height="640"></canvas>
+
+    <script>
+        const canvas = document.getElementById("myCanvas");
+        const ctx = canvas.getContext("2d");
+
+        var shipX = canvas.width/2;
+        var shipY = 7*canvas.height/8;
+        var shipSpeed = 1;
+        var shipHeading = Math.PI;
+        var shipLength = 40;
+        var wireLength = 24;
+        var steeringRate = 0;
+        var steeringAcceleration = 0.001;
+        var steeringLimit = 0.02;
+
+       
+        var sternX = shipX - shipLength*Math.sin(shipHeading);
+        var sternY = shipY - shipLength*Math.cos(shipHeading);
+        var netX = sternX;
+        var netY = sternY+wireLength;
+        var netHeading = shipHeading;
+
+        var score = 0;
+        var leftPressed = false;
+        var rightPressed = false;
+
+
+        
+        generateNewKrill();
+        var krillDrawXYs = [];
+        var krillNumber = 8;
+        var krillRadius = 8;
+        generateKrillDrawXYs();
+        var krillDrawCounter = 0;
+        
+
+        var wake=[]
+        var wakeLength = 60;
+        for(var i = 0; i < wakeLength; i++){
+          wake[i] = [shipX, shipY+shipLength];
+        }
+        var wakeCounter = 0;
+        var wakeThreshold = 5;
+
+        iceBergCount = 0;
+        iceBergs = [];
+
+
+        document.addEventListener("keydown", keyDownHandler, false);
+        document.addEventListener("keyup", keyUpHandler, false);
+
+        class IceBerg {
+          constructor(width, height){
+            var side = Math.floor(Math.random()*4);
+            if(side == 0){
+              this.x = -100;
+              this.y = 100+Math.random()*(height-200);
+              this.xSpeed = Math.random()*0.25;
+              this.ySpeed = Math.random()*0.125-0.06;
+            } else if (side == 1){
+              this.x = width+100;
+              this.y = 100+Math.random()*(height-200);
+              this.xSpeed = -Math.random()*0.25;
+              this.ySpeed = Math.random()*0.125-0.06;
+            } else if (side == 2){
+              this.x = 100+Math.random()*(width-200);
+              this.y = -100;
+              this.ySpeed = Math.random()*0.25;
+              this.xSpeed = Math.random()*0.125-0.06;
+            } else if (side == 3){
+              this.x = 100+Math.random()*(width-200);
+              this.y = height+100;
+              this.ySpeed = -Math.random()*0.25;
+              this.xSpeed = Math.random()*0.125-0.06;
+            }
+            
+          }
+
+          simStep(){
+            this.x = this.x+this.xSpeed;
+            this.y = this.y+this.ySpeed;
+            console.log(this.x+", "+this.y)
+          }
+
+          draw(){
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 45, 0, Math.PI*2);
+            ctx.closePath();
+            ctx.fillStyle = "#FFFFFF";
+            ctx.fill();
+          }
+
+
+        }
+
+
+        function keyDownHandler(e) {
+        if(e.code  == "ArrowRight") {
+            rightPressed = true;
+        }
+        else if(e.code == 'ArrowLeft') {
+            leftPressed = true;
+        }
+        }
+
+        function keyUpHandler(e) {
+            if(e.code  == "ArrowRight") {
+                rightPressed = false;
+            }
+            else if(e.code == 'ArrowLeft') {
+                leftPressed = false;
+            }
+        }
+
+        function calculateShipMotion(){
+          if(leftPressed){
+            if(steeringRate < steeringLimit){
+              steeringRate = steeringRate + steeringAcceleration;
+              if(steeringRate > steeringLimit){
+                steeringRate = steeringLimit;
+              }
+            } 
+          } else if(rightPressed){
+            if(steeringRate > -steeringLimit){
+              steeringRate = steeringRate - steeringAcceleration;
+              if(steeringRate < -steeringLimit){
+                steeringRate = -steeringLimit;
+              }
+            } 
+          } else {
+            if (steeringRate > 0){
+              steeringRate = steeringRate - steeringAcceleration;
+              if (steeringRate < 0){
+                steeringRate = 0;
+              }
+            }
+            else if (steeringRate < 0){
+              steeringRate = steeringRate + steeringAcceleration;
+              if (steeringRate > 0){
+                steeringRate = 0;
+              }
+            }
+          }
+          shipHeading = shipHeading + steeringRate;
+          
+
+          shipX = shipX + shipSpeed*Math.sin(shipHeading);
+          shipY = shipY + shipSpeed*Math.cos(shipHeading);
+          sternX = shipX - shipLength*Math.sin(shipHeading);
+          sternY = shipY - shipLength*Math.cos(shipHeading);
+
+          wakeCounter = wakeCounter + 1;
+          if(wakeCounter >= wakeThreshold){
+            wakeCounter = 0;
+            for(var i = 0; i < (wakeLength-1); i++){
+              wake[i] = wake[i+1];
+            }
+            
+            wake[wakeLength-1] = [sternX, sternY];
+          } else {
+            wakeCounter = wakeCounter + 1;
+          }
+        }
+
+        function calculateNetMotion(){
+          var oldNetY = netY;
+          var oldNetX = netX;
+          var oldDistance = distance(netX, netY, sternX, sternY);
+          dY = netY-sternY;
+          dX = netX-sternX;
+          netHeading = Math.atan2(dX,dY);
+          netX = sternX+wireLength*Math.sin(netHeading);
+          netY = sternY+wireLength*Math.cos(netHeading);
+          if(distance(netX, netY, sternX, sternY) > oldDistance){
+            netX = oldNetX;
+            netY = oldNetY;
+          }
+        }
+
+        function calculateIceBergs(){
+          for(var i = 0; i < iceBergCount; i++){
+            iceBergs[i].simStep();
+          }
+        }
+
+        function generateKrillDrawXYs(){
+          
+          var krillCount = 0;
+          while(krillCount < krillNumber){
+            var x = (Math.random()*(2*krillRadius))-krillRadius;
+            var y = (Math.random()*(2*krillRadius))-krillRadius;
+            if(Math.sqrt(x*x+y*y) < krillRadius){
+              
+              krillDrawXYs[krillCount] = [x,y];
+              krillCount+=1;
+            }
+          }
+
+        }
+
+        
+
+        function distance(x1, y1, x2, y2){
+          return Math.sqrt((x1-x2)**2+(y1-y2)**2);
+        }
+
+        function generateNewKrill(){
+          var shipToKrillThreshold = 100;
+          var generationSuccess = false;
+          while(generationSuccess == false){
+            krillX = 100+(Math.random()*(canvas.width-200));
+            krillY = 100+(Math.random()*(canvas.height-200));
+            if(distance(krillX,krillY, shipX, shipY) > shipToKrillThreshold){
+              generationSuccess = true;
+            }
+          }
+        }
+
+        function detectKrillCatch(){
+          var krillDistance = distance(netX, netY, krillX, krillY);
+          if(krillDistance <= 8){
+            score = score+1;
+            wireLength += 10;
+            generateNewKrill();
+            if((score%1)==0){
+              iceBergs[iceBergCount] = new IceBerg(canvas.width, canvas.height);
+              iceBergCount += 1;
+            }
+          }
+        }
+
+        function detectOutsidePermitZone(){
+          if((shipX < 0)||(shipX > canvas.width)||(shipY<0)||(shipY>canvas.height)){
+            return true;
+          } else if ((sternX < 0)||(sternX > canvas.width)||(sternY<0)||(sternY>canvas.height)){
+            return true;
+          } else {
+            return false;
+          }
+        }
+
+        function iceBergCollision(){
+          return false;
+        }
+
+
+        function drawShip(){
+          
+          ctx.beginPath();
+          ctx.translate(shipX, shipY);
+          ctx.rotate(-shipHeading);
+          ctx.moveTo(0,0);
+          ctx.lineTo(4,-4);
+          ctx.lineTo(4,-shipLength);
+          ctx.lineTo(-4,-shipLength);
+          ctx.lineTo(-4,-4);
+          ctx.closePath();
+          ctx.fillStyle = "#FF0000";
+          ctx.fill();
+          
+          ctx.rotate(shipHeading)
+          ctx.translate(-shipX, -shipY)
+        }
+
+        function drawWake(){
+          wakeWidth = 4;
+          widthDecrement = wakeWidth/wakeLength;
+          for(var i = wakeLength-1; i >= 0; i--){
+            ctx.beginPath();
+            ctx.arc(wake[i][0], wake[i][1], wakeWidth, 0, Math.PI*2);
+            ctx.closePath();
+            ctx.fillStyle = "#81E1FF";
+            ctx.fill();
+            wakeWidth = wakeWidth-widthDecrement;
+          }
+        }
+
+        function drawNet(){
+          ctx.moveTo(sternX, sternY);
+          ctx.lineTo(netX, netY);
+          ctx.strokeStyle = "#000000";
+
+          ctx.stroke();
+
+          ctx.translate(netX, netY);
+          ctx.rotate(-netHeading);
+          ctx.beginPath();
+          ctx.moveTo(-2,0);
+          ctx.lineTo(2,0);
+          ctx.lineTo(0,5);
+          
+          ctx.closePath();
+          ctx.fillStyle = "#000000";
+          ctx.fill();
+          
+          ctx.rotate(netHeading)
+          ctx.translate(-netX, -netY)
+        }
+
+        function drawKrill(){
+          
+          //ctx.beginPath();
+          //ctx.arc(krillX, krillY, krillRadius, 0, Math.PI*2);
+          //ctx.closePath();
+          //ctx.strokeStyle = "#FB7200";
+          //ctx.stroke();
+          if(krillDrawCounter >= 30){
+            generateKrillDrawXYs();
+            krillDrawCounter = 0;
+          } else {
+            krillDrawCounter+=1;
+          }
+       
+          for(var i = 0; i < krillNumber; i++){
+            ctx.beginPath();
+            ctx.arc(krillX+krillDrawXYs[i][0], krillY+krillDrawXYs[i][1], 1, 0, Math.PI*2);
+            ctx.closePath();
+            ctx.strokeStyle = "#FF7200";
+            ctx.stroke();
+          }
+        }
+
+        function drawIceBergs(){
+          for(var i = 0; i < iceBergCount; i++){
+            iceBergs[i].draw()
+          }
+        }
+
+        
+
+        function drawScore(){
+          ctx.font = "16px Arial";
+          ctx.fillStyle = "#0095DD";
+          ctx.fillText("Score: "+score, 8, 20);
+        }
+
+        function drawExitedPermitZone(){
+          ctx.font = "32px Impact";
+          
+          ctx.fillStyle = "#FFFFFF";
+
+          var textString = "You left the permit zone!";
+          textWidth = ctx.measureText(textString ).width;
+
+          ctx.fillText(textString, canvas.width/2-textWidth/2, 200);
+        }
+
+        function drawFinalScore(){
+          ctx.font = "24px Impact";
+          
+          ctx.fillStyle = "#FFFFFF";
+
+          var textString = "Score: "+score;
+          textWidth = ctx.measureText(textString ).width;
+
+          ctx.fillText(textString, canvas.width/2-textWidth/2, 350);
+        }
+
+        function gameLoop(){
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.rect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = "#0042C2";
+          ctx.fill();
+      
+          if(detectOutsidePermitZone() || iceBergCollision()){
+            if(detectOutsidePermitZone()){
+              drawExitedPermitZone();
+            } else {
+
+            }
+            drawFinalScore();
+            //document.location.reload();
+          }
+          else{
+            calculateShipMotion();
+            calculateNetMotion();
+            detectKrillCatch();
+            calculateIceBergs();
+          }
+          drawWake();
+          drawKrill();
+          drawIceBergs();
+          drawShip();
+          drawNet();
+          drawScore();
+        }
+
+        setInterval(gameLoop, 20);
+
+    </script>
+  </body>
+</html>
