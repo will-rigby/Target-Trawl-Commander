@@ -2,7 +2,7 @@
 <html lang="en-US">
   <head>
     <meta charset="utf-8" />
-    <title>Krill Commander</title>
+    <title>Target Trawl Commander</title>
     <style>
       * {
         padding: 0;
@@ -64,35 +64,46 @@
 
         iceBergCount = 0;
         iceBergs = [];
+        var iceBergSpeed = 3;
 
 
         document.addEventListener("keydown", keyDownHandler, false);
         document.addEventListener("keyup", keyUpHandler, false);
 
         class IceBerg {
-          constructor(width, height){
+          constructor(){
+
             var side = Math.floor(Math.random()*4);
             if(side == 0){
               this.x = -100;
-              this.y = 100+Math.random()*(height-200);
-              this.xSpeed = Math.random()*0.25;
-              this.ySpeed = Math.random()*0.125-0.06;
+              this.y = 100+Math.random()*(canvas.height-200);
+              this.xSpeed = iceBergSpeed*Math.random()*0.25;
+              this.ySpeed = iceBergSpeed*Math.random()*0.125-0.06;
             } else if (side == 1){
-              this.x = width+100;
-              this.y = 100+Math.random()*(height-200);
-              this.xSpeed = -Math.random()*0.25;
-              this.ySpeed = Math.random()*0.125-0.06;
+              this.x = canvas.width+100;
+              this.y = 100+Math.random()*(canvas.height-200);
+              this.xSpeed = iceBergSpeed*-Math.random()*0.25;
+              this.ySpeed = iceBergSpeed*Math.random()*0.125-0.06;
             } else if (side == 2){
-              this.x = 100+Math.random()*(width-200);
+              this.x = 100+Math.random()*(canvas.width-200);
               this.y = -100;
-              this.ySpeed = Math.random()*0.25;
-              this.xSpeed = Math.random()*0.125-0.06;
+              this.ySpeed = iceBergSpeed*Math.random()*0.25;
+              this.xSpeed = iceBergSpeed*Math.random()*0.125-0.06;
             } else if (side == 3){
-              this.x = 100+Math.random()*(width-200);
-              this.y = height+100;
-              this.ySpeed = -Math.random()*0.25;
-              this.xSpeed = Math.random()*0.125-0.06;
+              this.x = 100+Math.random()*(canvas.width-200);
+              this.y = canvas.height+100;
+              this.ySpeed = iceBergSpeed*-Math.random()*0.25;
+              this.xSpeed = iceBergSpeed*Math.random()*0.125-0.06;
             }
+            this.verticesCount = 3+Math.floor(Math.random()*5);
+            this.vertices = [];
+            var angle = Math.random()*2*Math.PI;
+            for(var i = 0; i < this.verticesCount; i++){
+              var radius = Math.random()*50+30;
+              this.vertices[i] = [radius*Math.cos(angle), radius*Math.sin(angle)];
+              angle += 2*Math.PI/this.verticesCount;
+            }
+
             
           }
 
@@ -100,11 +111,38 @@
             this.x = this.x+this.xSpeed;
             this.y = this.y+this.ySpeed;
             console.log(this.x+", "+this.y)
+            if((this.x>(canvas.width+100))||(this.x<-100)||(this.y>(canvas.height+100))||(this.y<-100)){
+              var side = Math.floor(Math.random()*4);
+              if(side == 0){
+                this.x = -100;
+                this.y = 100+Math.random()*(canvas.height-200);
+                this.xSpeed = iceBergSpeed*Math.random()*0.25;
+                this.ySpeed = iceBergSpeed*Math.random()*0.125-0.06;
+              } else if (side == 1){
+                this.x = canvas.width+100;
+                this.y = 100+Math.random()*(canvas.height-200);
+                this.xSpeed = iceBergSpeed*-Math.random()*0.25;
+                this.ySpeed = iceBergSpeed*Math.random()*0.125-0.06;
+              } else if (side == 2){
+                this.x = 100+Math.random()*(canvas.width-200);
+                this.y = -100;
+                this.ySpeed = iceBergSpeed*Math.random()*0.25;
+                this.xSpeed = iceBergSpeed*Math.random()*0.125-0.06;
+              } else if (side == 3){
+                this.x = 100+Math.random()*(canvas.width-200);
+                this.y = canvas.height+100;
+                this.ySpeed = iceBergSpeed*-Math.random()*0.25;
+                this.xSpeed = iceBergSpeed*Math.random()*0.125-0.06;
+              }
+            }
           }
 
           draw(){
             ctx.beginPath();
-            ctx.arc(this.x, this.y, 45, 0, Math.PI*2);
+            ctx.moveTo(this.x+this.vertices[0][0], this.y+this.vertices[0][1]);
+            for(var i = 1; i < this.verticesCount; i++){
+              ctx.lineTo(this.x+this.vertices[i][0], this.y+this.vertices[i][1]);
+            }
             ctx.closePath();
             ctx.fillStyle = "#FFFFFF";
             ctx.fill();
@@ -132,7 +170,61 @@
             }
         }
 
-        function calculateShipMotion(){
+        function pointInPolygon(vertices, verticeCount, pointX, pointY) {
+          //A point is in a polygon if a line from the point to infinity crosses the polygon an odd number of times
+          var odd = false;
+          //For each edge (In this case for each point of the polygon and the previous one)
+          var j = verticeCount - 1;
+          for (var i = 0; i < verticeCount; i++) {
+              //If a line from the point into infinity crosses this edge
+              if (((vertices[i][1] > pointY) !== (vertices[j][1] > pointY)) // One point needs to be above, one below our y coordinate
+                  // ...and the edge doesn't cross our Y corrdinate before our x coordinate (but between our x coordinate and infinity)
+                  && (pointX < ((vertices[j][0] - vertices[i][0]) * (pointY - vertices[i][1]) / (vertices[j][1] - vertices[i][1]) + vertices[i][0]))) {
+                  // Invert odd
+                  odd = !odd;
+              }
+              j = i;
+
+          }
+          //If the number of crossings was odd, the point is in the polygon
+          return odd;
+        }
+
+        function generateShipVertices(){
+          var vertices = []
+          vertices[0] = [0,0];
+          vertices[1] = [4,-4];
+          vertices[2] = [4,-shipLength];
+          vertices[3] = [-4,-shipLength];
+          vertices[4] = [-4,-4];
+          for(var i = 0; i < 5; i++){
+            vertices[i] = [vertices[i][0]*Math.cos(-shipHeading)-vertices[i][1]*Math.sin(-shipHeading), vertices[i][1]*Math.cos(-shipHeading)+vertices[i][0]*Math.sin(-shipHeading)];
+            vertices[i] = [vertices[i][0] + shipX, vertices[i][1]+shipY];
+          }
+          return vertices;
+        }
+        
+        function iceBergCollisionDetection(iceBerg){
+          var shipVertices = generateShipVertices();
+          var collision = false;
+          for(var i = 0; i < 5; i++){
+            collision = pointInPolygon(iceBerg.vertices, iceBerg.verticesCount, shipVertices[i][0], shipVertices[i][1]);
+            if(collision){
+              return true;
+            }
+          }
+          for(var i = 0; i < iceBerg.verticesCount; i++){
+            collision = pointInPolygon(shipVertices, 5, iceBerg.vertices[i][0], iceBerg.vertices[i][1]);
+            if(collision){
+              return true;
+            }
+          }
+
+          
+          return false;
+        }
+
+        function calculateShipMotion(){ 
           if(leftPressed){
             if(steeringRate < steeringLimit){
               steeringRate = steeringRate + steeringAcceleration;
@@ -243,7 +335,7 @@
             wireLength += 10;
             generateNewKrill();
             if((score%1)==0){
-              iceBergs[iceBergCount] = new IceBerg(canvas.width, canvas.height);
+              iceBergs[iceBergCount] = new IceBerg();
               iceBergCount += 1;
             }
           }
@@ -260,6 +352,11 @@
         }
 
         function iceBergCollision(){
+          for(var i = 0; i < iceBergCount; i++){
+            if(iceBergCollisionDetection(iceBergs[i])){
+              return true;
+            }
+          }
           return false;
         }
 
@@ -365,6 +462,17 @@
           ctx.fillText(textString, canvas.width/2-textWidth/2, 200);
         }
 
+        function drawIceBergCollision(){
+          ctx.font = "32px Impact";
+          
+          ctx.fillStyle = "#FFFFFF";
+
+          var textString = "You hit an iceberg!";
+          textWidth = ctx.measureText(textString ).width;
+
+          ctx.fillText(textString, canvas.width/2-textWidth/2, 200);
+        }
+
         function drawFinalScore(){
           ctx.font = "24px Impact";
           
@@ -396,6 +504,7 @@
             calculateNetMotion();
             detectKrillCatch();
             calculateIceBergs();
+            
           }
           drawWake();
           drawKrill();
