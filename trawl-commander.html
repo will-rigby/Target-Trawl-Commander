@@ -326,6 +326,50 @@
           }
           return vertices;
         }
+
+        function iceBergToiceBergCollision(i, j){
+          if(distance(iceBergs[i].x, iceBergs[i].y, iceBergs[j].x, iceBergs[j].y) > 180){
+                return false;
+          }
+          var iceBergIVertices = [];
+          var iceBergJVertices = [];
+          for(var bergDex = 0; bergDex < iceBergs[j].verticesCount; bergDex++){
+            iceBergJVertices[bergDex] = [iceBergs[j].vertices[bergDex][0]+iceBergs[j].x, iceBergs[j].vertices[bergDex][1]+iceBergs[j].y]
+          }
+          for(var bergDex = 0; bergDex < iceBergs[i].verticesCount; bergDex++){
+            iceBergIVertices[bergDex] = [iceBergs[i].vertices[bergDex][0]+iceBergs[i].x, iceBergs[i].vertices[bergDex][1]+iceBergs[i].y]
+          }
+          for(var verticeIndex = 0; verticeIndex < iceBergs[i].verticesCount; verticeIndex++){
+            var collision = robustPointInPolygon(iceBergJVertices, iceBergIVertices[verticeIndex]);
+            //console.log(collision);
+            if(collision == -1 || collision == 0){
+              return true;
+            }
+          }
+          for(var verticeIndex = 0; verticeIndex < iceBergs[j].verticesCount; verticeIndex++){
+            var collision = robustPointInPolygon(iceBergIVertices, iceBergJVertices[verticeIndex]);
+            //console.log(collision);
+            if(collision == -1 || collision == 0){
+              return true;
+            }
+          }
+          return false;
+        }
+
+        function iceBergToIceBergCollisionCheck(){
+          for(var i = 0; i < iceBergCount; i++){
+            for(var j = i+1; j < iceBergCount; j++){
+              if(iceBergToiceBergCollision(i,j)){
+                var ixSpeed = iceBergs[i].xSpeed;
+                var iySpeed = iceBergs[i].ySpeed;
+                iceBergs[i].xSpeed = iceBergs[j].xSpeed;
+                iceBergs[i].ySpeed = iceBergs[j].ySpeed;
+                iceBergs[j].xSpeed = ixSpeed;
+                iceBergs[j].ySpeed = iySpeed;
+              }
+            }
+          }
+        }
         
         function iceBergCollisionDetection(iceBerg){
           if(distance(shipX, shipY, iceBerg.x, iceBerg.y) > 180){
@@ -683,6 +727,12 @@
           textWidth = ctx.measureText(textString ).width;
 
           ctx.fillText(textString, canvas.width/2-textWidth/2, 350);
+
+          ctx.font = "24px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          textString = "HIT SPACE TO RESTART";
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width/2-textWidth/2, 390);
         }
 
         function resetGame(){
@@ -760,6 +810,7 @@
               calculateNetMotion();
               detectKrillCatch();
               calculateIceBergs();
+              iceBergToIceBergCollisionCheck();
               
             }
             drawWake();
