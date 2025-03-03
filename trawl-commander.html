@@ -16,12 +16,13 @@
     </style>
   </head>
   <body>
-    <h1>Krill Commander</h1>
     <canvas id="myCanvas" width="960" height="640"></canvas>
 
     <script>
         const canvas = document.getElementById("myCanvas");
         const ctx = canvas.getContext("2d");
+        var started = false;
+        var reset = false;
 
         var EPSILON     = 1.1102230246251565e-16
         var ERRBOUND3   = (3.0 + 16.0 * EPSILON) * EPSILON
@@ -66,8 +67,8 @@
         var wakeCounter = 0;
         var wakeThreshold = 5;
 
-        iceBergCount = 0;
-        iceBergs = [];
+        var iceBergCount = 0;
+        var iceBergs = [];
         var iceBergSpeed = 3;
 
 
@@ -81,22 +82,22 @@
             if(side == 0){
               this.x = -100;
               this.y = 100+Math.random()*(canvas.height-200);
-              this.xSpeed = iceBergSpeed*Math.random()*0.25;
+              this.xSpeed = iceBergSpeed*Math.random()*0.25+0.05;
               this.ySpeed = iceBergSpeed*Math.random()*0.125-0.06;
             } else if (side == 1){
               this.x = canvas.width+100;
               this.y = 100+Math.random()*(canvas.height-200);
-              this.xSpeed = iceBergSpeed*-Math.random()*0.25;
+              this.xSpeed = iceBergSpeed*-Math.random()*0.+0.05;
               this.ySpeed = iceBergSpeed*Math.random()*0.125-0.06;
             } else if (side == 2){
               this.x = 100+Math.random()*(canvas.width-200);
               this.y = -100;
-              this.ySpeed = iceBergSpeed*Math.random()*0.25;
+              this.ySpeed = iceBergSpeed*Math.random()*0.25+0.05;
               this.xSpeed = iceBergSpeed*Math.random()*0.125-0.06;
             } else if (side == 3){
               this.x = 100+Math.random()*(canvas.width-200);
               this.y = canvas.height+100;
-              this.ySpeed = iceBergSpeed*-Math.random()*0.25;
+              this.ySpeed = iceBergSpeed*-Math.random()*0.25+0.05;
               this.xSpeed = iceBergSpeed*Math.random()*0.125-0.06;
             }
             this.verticesCount = 3+Math.floor(Math.random()*5);
@@ -120,22 +121,22 @@
               if(side == 0){
                 this.x = -100;
                 this.y = 100+Math.random()*(canvas.height-200);
-                this.xSpeed = iceBergSpeed*Math.random()*0.25;
+                this.xSpeed = iceBergSpeed*Math.random()*0.25+0.05;
                 this.ySpeed = iceBergSpeed*Math.random()*0.125-0.06;
               } else if (side == 1){
                 this.x = canvas.width+100;
                 this.y = 100+Math.random()*(canvas.height-200);
-                this.xSpeed = iceBergSpeed*-Math.random()*0.25;
+                this.xSpeed = iceBergSpeed*-Math.random()*0.25+0.05;
                 this.ySpeed = iceBergSpeed*Math.random()*0.125-0.06;
               } else if (side == 2){
                 this.x = 100+Math.random()*(canvas.width-200);
                 this.y = -100;
-                this.ySpeed = iceBergSpeed*Math.random()*0.25;
+                this.ySpeed = iceBergSpeed*Math.random()*0.25+0.05;
                 this.xSpeed = iceBergSpeed*Math.random()*0.125-0.06;
               } else if (side == 3){
                 this.x = 100+Math.random()*(canvas.width-200);
                 this.y = canvas.height+100;
-                this.ySpeed = iceBergSpeed*-Math.random()*0.25;
+                this.ySpeed = iceBergSpeed*-Math.random()*0.25+0.05;
                 this.xSpeed = iceBergSpeed*Math.random()*0.125-0.06;
               }
             }
@@ -157,12 +158,19 @@
 
 
         function keyDownHandler(e) {
-        if(e.code  == "ArrowRight") {
-            rightPressed = true;
-        }
-        else if(e.code == 'ArrowLeft') {
-            leftPressed = true;
-        }
+          if(e.code  == "ArrowRight") {
+              rightPressed = true;
+          }
+          else if(e.code == 'ArrowLeft') {
+              leftPressed = true;
+          } else if(e.code == 'Space'){
+            if(!started){
+              started = true;
+            } else{
+              reset = true;
+            }
+            
+          }
         }
 
         function keyUpHandler(e) {
@@ -320,6 +328,9 @@
         }
         
         function iceBergCollisionDetection(iceBerg){
+          if(distance(shipX, shipY, iceBerg.x, iceBerg.y) > 180){
+            return false;
+          }
           var shipVertices = generateShipVertices();
           var collision = false;
           iceBergCurrentVertices = [];
@@ -329,14 +340,14 @@
 
           for(var i = 0; i < 5; i++){
             collision = robustPointInPolygon(iceBergCurrentVertices, shipVertices[i]);
-            console.log(collision);
+            //console.log(collision);
             if(collision == -1 || collision == 0){
               return true;
             }
           }
           for(var i = 0; i < iceBerg.verticesCount; i++){
             collision = robustPointInPolygon(shipVertices, iceBergCurrentVertices[i]);
-            console.log(collision);
+            //console.log(collision);
             if(collision == -1 || collision == 0){
               return true;
             }
@@ -457,8 +468,17 @@
             wireLength += 10;
             generateNewKrill();
             if((score%1)==0){
-              iceBergs[iceBergCount] = new IceBerg();
-              iceBergCount += 1;
+              if(iceBergCount < 10){
+                iceBergs[iceBergCount] = new IceBerg();
+                iceBergCount += 1;
+              } else {
+                  if(iceBergSpeed < 6){
+                  for(var i = 0; i < iceBergCount; i++){
+                    iceBergSpeed = iceBergSpeed*1.1;
+                  }
+                }
+              }
+              
             }
           }
         }
@@ -482,6 +502,56 @@
           return false;
         }
 
+        function drawTitleScreen(){
+          ctx.rect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = "#F95903";
+          ctx.fill();
+
+          ctx.font = "70px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          var textString = "Trawl Commander";
+          var textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width/2-textWidth/2, 200);
+
+          var textY = 300;
+          var lineSpacing = 30;
+          ctx.font = "24px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          textString = "Catch the krill.";
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
+          textY = textY + lineSpacing;
+
+          ctx.font = "24px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          textString = "Avoid the ice bergs.";
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
+          textY = textY + lineSpacing;
+
+          ctx.font = "24px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          textString = "Stay in the permit zone.";
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
+          textY = textY + lineSpacing;
+
+          ctx.font = "24px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          textString = "Left and right arrows to steer.";
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
+          textY = textY + 100;
+
+          ctx.font = "24px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          textString = "HIT SPACE TO START";
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
+          textY = textY + lineSpacing;
+
+
+        }
 
         function drawShip(){
           
@@ -490,12 +560,21 @@
           ctx.rotate(-shipHeading);
           ctx.moveTo(0,0);
           ctx.lineTo(4,-4);
+          ctx.lineTo(4,-14);
+          ctx.lineTo(6,-14);
+          ctx.lineTo(6,-16);
+          ctx.lineTo(4,-18);
           ctx.lineTo(4,-shipLength);
           ctx.lineTo(-4,-shipLength);
+          ctx.lineTo(-4,-18);
+          ctx.lineTo(-6,-16);
+          ctx.lineTo(-6,-14);
+          ctx.lineTo(-4,-14);
           ctx.lineTo(-4,-4);
           ctx.closePath();
           ctx.fillStyle = "#FF0000";
           ctx.fill();
+          
           
           ctx.rotate(shipHeading)
           ctx.translate(-shipX, -shipY)
@@ -568,7 +647,7 @@
         
 
         function drawScore(){
-          ctx.font = "16px Arial";
+          ctx.font = "16px Courier New";
           ctx.fillStyle = "#0095DD";
           ctx.fillText("Score: "+score, 8, 20);
         }
@@ -606,35 +685,99 @@
           ctx.fillText(textString, canvas.width/2-textWidth/2, 350);
         }
 
+        function resetGame(){
+          shipX = canvas.width/2;
+          shipY = 7*canvas.height/8;
+          shipSpeed = 1;
+          shipHeading = Math.PI;
+          shipLength = 40;
+          wireLength = 24;
+          steeringRate = 0;
+          steeringAcceleration = 0.001;
+          steeringLimit = 0.02;
+
+        
+          sternX = shipX - shipLength*Math.sin(shipHeading);
+          sternY = shipY - shipLength*Math.cos(shipHeading);
+          netX = sternX;
+          netY = sternY+wireLength;
+          netHeading = shipHeading;
+
+          score = 0;
+          leftPressed = false;
+          rightPressed = false;
+
+
+          
+          generateNewKrill();
+          krillDrawXYs = [];
+          krillNumber = 8;
+          krillRadius = 8;
+          generateKrillDrawXYs();
+          krillDrawCounter = 0;
+          
+
+          wake=[]
+          wakeLength = 60;
+          for(var i = 0; i < wakeLength; i++){
+            wake[i] = [shipX, shipY+shipLength];
+          }
+          wakeCounter = 0;
+          wakeThreshold = 5;
+
+          iceBergCount = 0;
+          iceBergs = [];
+          iceBergSpeed = 3;
+        }
+
         function gameLoop(){
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.rect(0, 0, canvas.width, canvas.height);
-          ctx.fillStyle = "#0042C2";
-          ctx.fill();
-      
-          if(detectOutsidePermitZone() || iceBergCollision()){
-            if(detectOutsidePermitZone()){
-              drawExitedPermitZone();
-            } else {
-              drawIceBergCollision();
-            }
-            drawFinalScore();
-            //document.location.reload();
-          }
-          else{
-            calculateShipMotion();
-            calculateNetMotion();
-            detectKrillCatch();
-            calculateIceBergs();
+          if(started){
             
-          }
-          drawWake();
-          drawKrill();
-          drawIceBergs();
-          drawShip();
-          drawNet();
-          drawScore();
+            ctx.rect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "#0042C2";
+            ctx.fill();
+        
+            if(detectOutsidePermitZone() || iceBergCollision()){
+              ctx.rect(0,200,canvas.width,30);
+              ctx.fillStyle = "#F95903";
+              ctx.fill();
+              if(detectOutsidePermitZone()){
+                drawExitedPermitZone();
+              } else {
+                drawIceBergCollision();
+              }
+              drawFinalScore();
+              if(reset){
+                reset = false;
+                resetGame();
+              }
+              //document.location.reload();
+            }
+            else{
+              reset = false;
+              calculateShipMotion();
+              calculateNetMotion();
+              detectKrillCatch();
+              calculateIceBergs();
+              
+            }
+            drawWake();
+            if(!(detectOutsidePermitZone() || iceBergCollision())){
+              drawKrill();
+              drawIceBergs();
+            }
+            drawShip();
+            drawNet();
+            if(!(detectOutsidePermitZone() || iceBergCollision())){
+              drawScore();
+            }
+            
+        } else {
+          drawTitleScreen();
         }
+      }
+
 
         setInterval(gameLoop, 20);
 
