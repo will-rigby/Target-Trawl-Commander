@@ -23,23 +23,48 @@
         const ctx = canvas.getContext("2d");
         var started = false;
         var reset = false;
+        var sonarPulsing = false;
+        var sonarHitTarget = false;
+        var sonarRadius = 0.0;
+        var sonarReflectionRadius = 0.0;
+        var sonarPulseSpeed = 5.0;
+        
+        var waveOffset = 0;
+        var waveWidth = 15;
+        var waveY = 100;
 
         
+
+        var shipWidth = 400;
+        var hullRadius = 60;
+        var shipTopY = 0;
+        var shipDraftY = waveY+100;
+        
         var score = 0;
+        var count = 0;
         var timeLeft = 10.0
-        var maxTime = 10.0
+        const stepTime = 25;
+        var maxTime = 10.0;
+        var stationaryTimeTarget = 2.0;
+        var currentStationaryTime = 0.0;
+        
+        
 
         var wireOutLeft = 300.0;
         var wireOutRight = 300.0
-        var motorSpeed = 5.0;
+        var motorSpeed = 1.5;
         var maxWireOut = 700.0;
-        var winchSpacing = 500.0;
+        var winchSpacing = 420.0;
         var ballX = calculateIntersectX(wireOutLeft, wireOutRight, winchSpacing);
         var ballY = calculateIntersectY(wireOutLeft, wireOutRight, winchSpacing);
 
-        var leftWinchX = 50;
+        var targetX = generateTargetLocationX();
+        var targetY = generateTargetLocationY();
+        var targetRadius = 20.0;
+
+        var leftWinchX = (canvas.width-winchSpacing)/2;
         var rightWinchX = leftWinchX + winchSpacing;
-        var winchY = 100;
+        var winchY = 180;
         
         var seaFloorDepth = 450;
         
@@ -80,6 +105,7 @@
             } else if(e.code == 'KeyS'){
                 sKeyPressed = false;
             }
+            
         }
 
         function calculateIntersectX(r1, r2, d){
@@ -100,17 +126,22 @@
           return Math.sqrt((x1-x2)**2+(y1-y2)**2);
         }
 
+
         function drawTitleScreen(){
-          ctx.rect(0,0,canvas.width,canvas.height);
-          ctx.fillStyle = "#F95903";
-          ctx.fill();
+          
 
-          ctx.font = "70px Impact";
+          ctx.font = "40px Impact";
           ctx.fillStyle = "#FFFFFF";
-          var textString = "Trawl Commander";
+          var textString = "Acoustic Calibration";
           var textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width/2-textWidth/2, 200);
+          ctx.fillText(textString, canvas.width/2-textWidth/2, 150);
 
+          ctx.font = "20px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          var textString = "The Game!";
+          var textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width/2-textWidth/2, 180);
+/*
           var textY = 300;
           var lineSpacing = 30;
           ctx.font = "24px Impact";
@@ -140,40 +171,89 @@
           textWidth = ctx.measureText(textString ).width;
           ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
           textY = textY + 100;
-
+*/
           ctx.font = "24px Impact";
           ctx.fillStyle = "#FFFFFF";
           textString = "HIT SPACE TO START";
           textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
-          textY = textY + lineSpacing;
+          ctx.fillText(textString, canvas.width/2-textWidth/2, 500);
+          //textY = textY + lineSpacing;
 
         }
 
-        function draw_ocean(){
+        function drawScoreRange(){
+            ctx.beginPath();
+            ctx.rect(canvas.width/2-winchSpacing/2, shipDraftY + 20, winchSpacing, 300);
+            ctx.closePath();
+            ctx.strokeStyle = "#FF0000";
+            ctx.stroke();
+        }
+
+        function drawOcean(){
+            
+            ctx.strokeStyle = "#0042C2";
+            ctx.beginPath()
+            ctx.moveTo(0,canvas.height);
+            const seaGradient = ctx.createLinearGradient(0,waveY+50, 0, canvas.height-100);
+
+            // Add three color stops
+            seaGradient.addColorStop(0, "#0042C2");
+            seaGradient.addColorStop(1, "#002368");
+            ctx.fillStyle = seaGradient;
+            
+            var waveLocation = -2*waveWidth+waveOffset;
+            ctx.lineTo(-2*waveWidth+waveOffset, waveY);
+            var radius = waveWidth/3
+            while(waveLocation < (canvas.width + waveWidth+waveOffset)){
+                ctx.arc(waveLocation,               waveY , radius, 5*Math.PI/4, 7*Math.PI/4);
+                ctx.arc(waveLocation+waveWidth,   waveY , radius, 3*Math.PI/4, 1*Math.PI/4, true);
+                //ctx.arc(waveLocation+3*waveWidth/4,waveY,waveWidth/4,3*Math.PI/2,2*Math.PI );
+                waveLocation = waveLocation+waveWidth*2;
+            }
+            
+            waveOffset = waveOffset + 1;
+            if(waveOffset > waveWidth*2){
+                waveOffset = 0;
+            }
+            ctx.lineTo(canvas.width, canvas.height);
+            ctx.closePath()
+            ctx.fill();
 
         }
 
         function drawShip(){
-          
-          ctx.beginPath();
-          ctx.moveTo(0,0);
-          ctx.lineTo(4,-4);
-          ctx.lineTo(4,-14);
-          ctx.lineTo(6,-14);
-          ctx.lineTo(6,-16);
-          ctx.lineTo(4,-18);
-          ctx.lineTo(4,-shipLength);
-          ctx.lineTo(-4,-shipLength);
-          ctx.lineTo(-4,-18);
-          ctx.lineTo(-6,-16);
-          ctx.lineTo(-6,-14);
-          ctx.lineTo(-4,-14);
-          ctx.lineTo(-4,-4);
-          ctx.closePath();
-          ctx.fillStyle = "#FF0000";
-          ctx.fill();
-          
+            // Draw Orange
+            ctx.strokeStyle = "#000000";
+            ctx.moveTo(leftWinchX, winchY);
+            ctx.lineTo(canvas.width/2, winchY-80);
+            ctx.lineTo(rightWinchX, winchY);
+            ctx.stroke();
+
+
+            ctx.fillStyle = "#FF0000";
+            ctx.beginPath();
+            ctx.moveTo(canvas.width/2 - shipWidth/2, shipTopY);
+            ctx.arc(canvas.width/2 - shipWidth/2+hullRadius, shipDraftY - hullRadius, hullRadius, Math.PI, Math.PI/2, true);
+            ctx.arc(canvas.width/2 + shipWidth/2-hullRadius, shipDraftY - hullRadius, hullRadius, Math.PI/2, 2*Math.PI,true);
+            ctx.lineTo(canvas.width/2 + shipWidth/2, shipTopY);
+            ctx.closePath()
+            ctx.fill();
+
+            ctx.fillStyle = "#0F0F0F";
+            ctx.beginPath();
+            ctx.moveTo(canvas.width/2 - shipWidth/2, waveY - 20);
+            ctx.arc(canvas.width/2 - shipWidth/2+hullRadius, shipDraftY - hullRadius, hullRadius, Math.PI, Math.PI/2, true);
+            ctx.arc(canvas.width/2 + shipWidth/2-hullRadius, shipDraftY - hullRadius, hullRadius, Math.PI/2, 2*Math.PI,true);
+            ctx.lineTo(canvas.width/2 + shipWidth/2, waveY - 20);
+            ctx.closePath()
+            ctx.fill();
+
+            
+            
+
+         
+            //ctx.fillStyle = "#FF0000";
+            //ctx.fill();
          
         }
 
@@ -201,6 +281,7 @@
         }
 
         function drawWinchesAndBall(){
+            ctx.strokeStyle = "#000000"
             ctx.beginPath();
             ctx.arc(leftWinchX, winchY, 3, 0, 2*Math.PI);
             ctx.closePath();
@@ -214,24 +295,29 @@
             ctx.beginPath();
             ctx.arc(leftWinchX+ballX, winchY+ballY, 3, 0, 2*Math.PI);
             ctx.closePath();
+            ctx.fillStyle = "#ababab"
+            ctx.fill();
+
+            ctx.moveTo((canvas.width/2-shipWidth/2)-5, 0)
+            ctx.lineTo(leftWinchX, winchY);
+            ctx.lineTo(leftWinchX + ballX, winchY + ballY-3);
+            ctx.lineTo(rightWinchX, winchY);
+            ctx.lineTo((canvas.width/2+shipWidth/2)+5, 0)
             ctx.stroke();
 
-            ctx.moveTo(leftWinchX, winchY);
-            ctx.lineTo(leftWinchX + ballX, winchY + ballY);
-            ctx.lineTo(rightWinchX, winchY);
-            ctx.stroke();
+            
 
         }
 
         function drawBackground(){
-            ctx.fillStyle = "#0042C2";
+            ctx.fillStyle = "#abf0f7";//abf0f7
             ctx.beginPath();
             ctx.rect(0, 0, canvas.width, canvas.height);
             ctx.closePath();
             //
             ctx.fill();
-            ctx.stroke();
         }
+        
 
         function drawSeaFloor(){
             const gradient = ctx.createLinearGradient(0,winchY + seaFloorDepth+5, 0, canvas.height-5);
@@ -247,14 +333,43 @@
             ctx.fill();
         }
 
+        function drawTargetAreaWhite(){
+            ctx.fillStyle = "rgba(255, 255, 255, 0.2";
+            ctx.beginPath();
+            ctx.arc(targetX, targetY, targetRadius, 0, 2*Math.PI);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        function drawTargetAreaGreen(){
+            ctx.fillStyle = "rgba(0, 255, 0, 0.5";
+            ctx.beginPath();
+            ctx.arc(targetX, targetY, targetRadius, 0, 2*Math.PI);
+            ctx.closePath();
+            ctx.fill();
+        }
+
         function resetGame(){
           shipX = canvas.width/2;
           score = 0;
+          count = 0;
           leftPressed = false;
           rightPressed = false;
           sKeyPressed = false;
           wKeyPressed = false;
 
+        }
+
+        function generateTargetLocationX(){
+            return (canvas.width/2-winchSpacing/2)+(Math.random()*winchSpacing);
+        }
+
+        function generateTargetLocationY(){
+            return (shipDraftY+20) + Math.random()*300;
+        }
+
+        function checkInTarget(){
+            return (distance(ballX+leftWinchX, ballY+winchY, targetX, targetY) < (targetRadius))
         }
 
         function calculateWinch(){
@@ -291,7 +406,12 @@
                 }
             }
 
-            console.log(wireOutLeft+", "+wireOutRight)
+            if(!sKeyPressed && !wKeyPressed && !downPressed && !upPressed){
+                currentStationaryTime = currentStationaryTime + stepTime/1000.0;
+            } else {
+                currentStationaryTime = 0.0;
+            }
+
 
             ballX = calculateIntersectX(wireOutLeft, wireOutRight, winchSpacing);
             
@@ -307,27 +427,218 @@
             } else {
                 ballY = calculateIntersectY(wireOutLeft, wireOutRight, winchSpacing);
             }
+            if(ballY<20){
+                ballY = 20;
+            }
+
+        }
+
+        function gameStep(){
+            
+            
+        const stepTime = 50;
+        var maxTime = 10.0
+        }
+
+        function drawSonarPulse(){
+            var ballAngle = Math.atan2((ballY+winchY)-shipDraftY,(ballX+leftWinchX)-(canvas.width/2));
+            if(sonarHitTarget){
+                var brightness = 1.0-sonarRadius/(2*distance(targetX, targetY, canvas.width/2, shipDraftY));
+            }  else {
+                var brightness = 1.0-sonarRadius/(2*distance(targetX, targetY, canvas.width/2, shipDraftY));
+            }
+            if(brightness < 0.0){
+                brightness = 0.0;
+            }
+            var styleString = "rgb(255,255,255, "+brightness.toString()+")";
+            ctx.strokeStyle = styleString;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(canvas.width/2, shipDraftY, sonarRadius, ballAngle-Math.PI/32,ballAngle+Math.PI/32);
+            ctx.stroke();
+            ctx.closePath();
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "#000000";
+
+        }
+
+        function drawSonarReflection(){
+            var ballAngle = Math.atan2((ballY+winchY)-shipDraftY,(ballX+leftWinchX)-(canvas.width/2));
+            var brightness = 1.0-sonarRadius/(2*distance(targetX, targetY, canvas.width/2, shipDraftY));
+            if(brightness < 0.0){
+                brightness = 0.0;
+            }
+            var styleString = "rgb(255,255,255, "+brightness.toString()+")";
+            ctx.strokeStyle = styleString;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(ballX+leftWinchX, ballY+winchY, sonarReflectionRadius, 0, 2*Math.PI);//ballAngle-Math.PI/2+Math.PI,ballAngle+Math.PI/2+Math.PI);
+            ctx.stroke();
+            ctx.closePath();
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "#000000";
+        }
+
+        function drawScore(){
+          ctx.font = "16px Courier New";
+          ctx.fillStyle = "#0095DD";
+          ctx.fillText("Score: "+score, 8, 20);
+        }
+
+        function drawTimeLeft(){
+            var x = 20;
+            var y = 200;
+            var height = 300;
+            var width = 20;
+            var border = 4;
+            
+            ctx.beginPath();
+            ctx.rect(x-border, y-border,width+border*2, height+border*2);
+            ctx.closePath();
+            ctx.fillStyle = "#000000";
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.rect(x, y,width, height);
+            ctx.closePath();
+            ctx.fillStyle = "#0F0F0F";
+            ctx.fill();
+
+            if(timeLeft > (maxTime*0.5)){
+                var colour = "#00FF00";
+            } else if (timeLeft > (maxTime*0.2)){
+                var colour = "#FF8C00";
+            } else {
+                var colour = "#FF0000";
+            }
+            ctx.fillStyle =colour;
+
+            var barHeight = height*timeLeft/maxTime;
+            var barY = height-barHeight;
+            ctx.beginPath();
+            ctx.rect(x, y+barY,width, barHeight);
+            ctx.closePath();
+            ctx.fill();
+
 
         }
 
         function gameLoop(){
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
-            if(!started){
+            if(started){
+                if(sonarPulsing){
+                    if(sonarHitTarget){
+                        drawBackground();
+                        drawOcean();
+                        drawShip();
+                        drawSonarReflection();
+                        drawSonarPulse();
+                        drawSeaFloor();
+                        drawScore();
+                        drawTimeLeft();
+                        drawWinchesAndBall();
+                        if(sonarReflectionRadius >= distance(canvas.width/2, shipDraftY, ballX+leftWinchX, ballY+winchY) && sonarRadius > (2*distance(targetX, targetY, canvas.width/2, shipDraftY))){
+                            sonarHitTarget = false;
+                            sonarPulsing = false;
+                            sonarRadius = 0.1;
+                            sonarReflectionRadius = 0.1;
+                            var newTargetX = generateTargetLocationX();
+                            var newTargetY = generateTargetLocationY();
+                            var targetDistance = distance(newTargetX, newTargetY, targetX, targetY);
+                            var maxTargetDistance = (motorSpeed*maxTime/(stepTime/1000)) - 20;
+                            console.log(maxTargetDistance);
+                            while ((targetDistance < 100) || (targetDistance > maxTargetDistance)){
+                                newTargetX = generateTargetLocationX();
+                                newTargetY = generateTargetLocationY();
+                                targetDistance = distance(newTargetX, newTargetY, targetX, targetY);
+                                if((count % 5)== 0){
+                                    maxTime = maxTime - 2.0;
+                                    if(maxTime < 4){
+                                        maxTime = 4.0;
+                                    }
+                                }
+                                if ((count % 2) == 0){
+                                    targetRadius = targetRadius - 2;
+                                    if(targetRadius < 4){
+                                        targetRadius = 4;
+                                    }
+                                }
+                            }
+                            targetX = newTargetX;
+                            targetY = newTargetY;
+                            timeLeft = maxTime;
+                        }
+                        sonarRadius = sonarRadius + sonarPulseSpeed;
+                        sonarReflectionRadius = sonarReflectionRadius +sonarPulseSpeed;
+                    } else {
+                        drawBackground();
+                        drawOcean();
+                        drawShip();
+                        drawSeaFloor();
+                        drawScore();
+                        drawTimeLeft();
+                        drawWinchesAndBall();
+                        drawSonarPulse();
+                        
+                        if(sonarRadius >= distance(canvas.width/2, shipDraftY, ballX+leftWinchX, ballY+winchY)){
+                            sonarHitTarget = true;
+                        }
+                        sonarRadius = sonarRadius+sonarPulseSpeed;
+                    }
+                }
+                else{
+                    timeLeft = timeLeft - (stepTime/1000.0);
                 
+                    if(timeLeft <= 0.0){
+                        if(checkInTarget()){
+                            sonarPulsing = true;
+                            score = score+10;
+                            count = count + 1;
+                        } else {
+                            //failed
+                        }
+                    } else {
+                        calculateWinch();
+                        drawBackground();
+                        drawOcean();
+                        drawShip();
+                        //drawScoreRange()
+                        //drawTimeLeft();
+                        drawScore();
+                        drawTimeLeft();
+                        drawSeaFloor();
+                        if(checkInTarget()){
+                            drawTargetAreaGreen();
+                            console.log(currentStationaryTime);
+                            if(stationaryTimeTarget <= currentStationaryTime){
+                                sonarPulsing = true;
+                                console.log("Time Left: "+timeLeft);
+                                score = score+ 10 + Math.floor(timeLeft);
+                                count = count + 1;
+                            }
+                        } else {
+                            drawTargetAreaWhite();
+                        }
+                        drawWinchesAndBall();
+                    }
+                
+                }
 
-                calculateWinch();
-                drawBackground();
-                drawSeaFloor();
-                drawWinchesAndBall();
+                
                 
             } else {
-            //drawTitleScreen();
+                drawBackground();
+                drawOcean();
+                drawShip();
+                drawSeaFloor();
+                drawWinchesAndBall();
+                drawTitleScreen();
             }
         }
 
 
-        setInterval(gameLoop, 50);
+        setInterval(gameLoop, stepTime);
 
     </script>
   </body>
