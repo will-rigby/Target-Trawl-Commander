@@ -2,7 +2,7 @@
 <html lang="en-US">
   <head>
     <meta charset="utf-8" />
-    <title>Target Trawl Commander</title>
+    <title>Acoustic Calibration: The Game</title>
     <style>
       * {
         padding: 0;
@@ -32,6 +32,12 @@
         var waveOffset = 0;
         var waveWidth = 15;
         var waveY = 100;
+
+        var failReason = 0;
+        const hitBottom = 0;
+        const outOfTime = 1;
+        const sealGotBall = 2;
+
 
         
 
@@ -66,7 +72,7 @@
         var rightWinchX = leftWinchX + winchSpacing;
         var winchY = 180;
         
-        var seaFloorDepth = 450;
+        var seaFloorDepth = 550;
         
         var upPressed = false;
         var downPressed = false;
@@ -87,9 +93,9 @@
                 sKeyPressed = true;
             } else if(e.code == 'Space'){
                 if(!started){
-                started = true;
+                    started = true;
                 } else {
-                reset = true;
+                    reset = true;
                 }
             }
         }
@@ -258,27 +264,12 @@
         }
 
         function drawScore(){
-          ctx.font = "16px Courier New";
+          ctx.font = "20px Arial";
           ctx.fillStyle = "#0095DD";
           ctx.fillText("Score: "+score, 8, 20);
         }
 
-        function drawFinalScore(){
-          ctx.font = "24px Impact";
-          
-          ctx.fillStyle = "#FFFFFF";
-
-          var textString = "Score: "+score;
-          textWidth = ctx.measureText(textString ).width;
-
-          ctx.fillText(textString, canvas.width/2-textWidth/2, 350);
-
-          ctx.font = "24px Impact";
-          ctx.fillStyle = "#FFFFFF";
-          textString = "HIT SPACE TO RESTART";
-          textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width/2-textWidth/2, 390);
-        }
+       
 
         function drawWinchesAndBall(){
             ctx.strokeStyle = "#000000"
@@ -320,14 +311,14 @@
         
 
         function drawSeaFloor(){
-            const gradient = ctx.createLinearGradient(0,winchY + seaFloorDepth+5, 0, canvas.height-5);
+            const gradient = ctx.createLinearGradient(0,seaFloorDepth+5, 0, canvas.height-5);
 
             // Add three color stops
             gradient.addColorStop(0, "#502D16");
             gradient.addColorStop(1, "black");
             ctx.fillStyle = gradient;
             ctx.beginPath();
-            ctx.rect(0, winchY + seaFloorDepth, canvas.width, canvas.height-winchY - seaFloorDepth);
+            ctx.rect(0, seaFloorDepth, canvas.width, canvas.height-seaFloorDepth);
             ctx.closePath();
             //
             ctx.fill();
@@ -350,13 +341,31 @@
         }
 
         function resetGame(){
-          shipX = canvas.width/2;
-          score = 0;
-          count = 0;
-          leftPressed = false;
-          rightPressed = false;
-          sKeyPressed = false;
-          wKeyPressed = false;
+          
+            score = 0;
+            count = 0;
+            leftPressed = false;
+            rightPressed = false;
+            sKeyPressed = false;
+            wKeyPressed = false;
+            
+            score = 0;
+            count = 0;
+            timeLeft = 10.0
+            maxTime = 10.0;
+            currentStationaryTime = 0.0;
+        
+        
+
+            wireOutLeft = 300.0;
+            wireOutRight = 300.0
+     
+            ballX = calculateIntersectX(wireOutLeft, wireOutRight, winchSpacing);
+            ballY = calculateIntersectY(wireOutLeft, wireOutRight, winchSpacing);
+
+            targetX = generateTargetLocationX();
+            targetY = generateTargetLocationY();
+            targetRadius = 20.0;
 
         }
 
@@ -480,9 +489,57 @@
         }
 
         function drawScore(){
-          ctx.font = "16px Courier New";
-          ctx.fillStyle = "#0095DD";
-          ctx.fillText("Score: "+score, 8, 20);
+            ctx.font = "20px Arial";
+            ctx.fillStyle = "#FFFFFF";
+            ctx.fillText("Score: "+score, 110, 20);
+        }
+
+        function drawCount(){
+            ctx.font = "20px Arial";
+            ctx.fillStyle = "#FFFFFF";
+            var textString = "Calibrations: "+count;
+            var textWidth = ctx.measureText(textString ).width;
+            ctx.fillText(textString, 490-textWidth, 20);
+        }
+
+        function drawFinalScore(){
+            ctx.fillStyle = "rgba(0,0,0,0.5)";
+            ctx.beginPath();
+            var rectW = 300;
+            var rectX = (canvas.width/2)-(rectW/2);
+            var rectY = 290;
+            var rectH = 140
+            ctx.rect(rectX, rectY, rectW, rectH);
+            ctx.closePath();
+            ctx.fill();
+            ctx.font = "24px Impact";
+            
+            ctx.fillStyle = "#FFFFFF";
+            if(failReason == hitBottom){
+                var textString = "You got the target ball in the mud!";
+            } else if (failReason == outOfTime){
+                var t
+            }
+            
+            textWidth = ctx.measureText(textString ).width;
+
+            ctx.fillText(textString, canvas.width/2-textWidth/2, 320);
+
+            textString = "Score: "+score;
+            textWidth = ctx.measureText(textString ).width;
+
+            ctx.fillText(textString, canvas.width/2-textWidth/2, 350);
+
+            textString = "Calibrations: "+count;
+            textWidth = ctx.measureText(textString).width;
+
+            ctx.fillText(textString, canvas.width/2-textWidth/2, 380);
+
+            ctx.font = "24px Impact";
+            ctx.fillStyle = "#FFFFFF";
+            textString = "HIT SPACE TO RESTART";
+            textWidth = ctx.measureText(textString ).width;
+            ctx.fillText(textString, canvas.width/2-textWidth/2, 420);
         }
 
         function drawTimeLeft(){
@@ -523,6 +580,22 @@
 
         }
 
+        function failed(){
+            drawBackground();
+            drawOcean();
+            drawShip();
+            drawSeaFloor();
+            drawScore();
+            drawCount();
+            
+            drawWinchesAndBall();
+            drawFinalScore();
+            if(reset){
+                resetGame();
+                reset = false;
+            }
+        }
+
         function gameLoop(){
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
@@ -536,6 +609,7 @@
                         drawSonarPulse();
                         drawSeaFloor();
                         drawScore();
+                        drawCount();
                         drawTimeLeft();
                         drawWinchesAndBall();
                         if(sonarReflectionRadius >= distance(canvas.width/2, shipDraftY, ballX+leftWinchX, ballY+winchY) && sonarRadius > (2*distance(targetX, targetY, canvas.width/2, shipDraftY))){
@@ -552,21 +626,23 @@
                                 newTargetX = generateTargetLocationX();
                                 newTargetY = generateTargetLocationY();
                                 targetDistance = distance(newTargetX, newTargetY, targetX, targetY);
-                                if((count % 5)== 0){
-                                    maxTime = maxTime - 2.0;
-                                    if(maxTime < 4){
-                                        maxTime = 4.0;
-                                    }
-                                }
-                                if ((count % 2) == 0){
-                                    targetRadius = targetRadius - 2;
-                                    if(targetRadius < 4){
-                                        targetRadius = 4;
-                                    }
-                                }
+                                
                             }
                             targetX = newTargetX;
                             targetY = newTargetY;
+                            
+                            if((count % 5)== 0){
+                                maxTime = maxTime - 2.0;
+                                if(maxTime < 2){
+                                    maxTime = 2.0;
+                                }
+                            }
+                            if ((count % 2) == 0){
+                                targetRadius = targetRadius - 2;
+                                if(targetRadius < 4){
+                                    targetRadius = 4;
+                                }
+                            }
                             timeLeft = maxTime;
                         }
                         sonarRadius = sonarRadius + sonarPulseSpeed;
@@ -577,6 +653,7 @@
                         drawShip();
                         drawSeaFloor();
                         drawScore();
+                        drawCount();
                         drawTimeLeft();
                         drawWinchesAndBall();
                         drawSonarPulse();
@@ -596,8 +673,10 @@
                             score = score+10;
                             count = count + 1;
                         } else {
-                            //failed
-                        }
+                            failReason = hitBottom;
+                            failed();
+                            }
+                        
                     } else {
                         calculateWinch();
                         drawBackground();
@@ -606,6 +685,7 @@
                         //drawScoreRange()
                         //drawTimeLeft();
                         drawScore();
+                        drawCount();
                         drawTimeLeft();
                         drawSeaFloor();
                         if(checkInTarget()){
