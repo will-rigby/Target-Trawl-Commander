@@ -657,10 +657,10 @@
                             var sealDist = Math.abs(targetY-sealY);
                             while(sealDist < 100){
                                 sealY = Math.random()*(seaFloorDepth-winchY-40)+winchY+20;
-                                sealDist = Math.abs(newTargetY-sealY);
+                                sealDist = Math.abs(targetY-sealY);
                             } 
                         }
-                            
+
                     } else {
                         if(sealHasBall){
                             sealX = sealX-3*sealSpeed;
