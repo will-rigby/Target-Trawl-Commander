@@ -52,7 +52,7 @@
         var sealSwimming = false;
         var sealHasBall = false;
         var sealSwimmingRight = true;
-        const sealStartRound = 0;
+        const sealStartRound = 3;
         var sealX = -100.0;
         var sealY = -100.0;
         var sealSpeed = 2.0;
@@ -533,7 +533,7 @@
         function drawFinalScore(){
             ctx.fillStyle = "rgba(0,0,0,0.5)";
             ctx.beginPath();
-            var rectW = 300;
+            var rectW = 400;
             var rectX = (canvas.width/2)-(rectW/2);
             var rectY = 290;
             var rectH = 140
@@ -640,7 +640,7 @@
         }
 
         function calculateSeal(){
-            if(count > sealStartRound){
+            if(count >= sealStartRound){
                 if(sealSwimming){
                     if(sealSwimmingRight){
                         if(sealHasBall){
@@ -654,13 +654,13 @@
                         } else if(sealX > (canvas.width + 500)){
                             sealSwimmingRight = false;
                             sealY = Math.random()*(seaFloorDepth-winchY-40)+winchY+20;
-                            var sealDist = distance(targetX, targetY, sealX, sealY);
+                            var sealDist = Math.abs(targetY-sealY);
                             while(sealDist < 100){
                                 sealY = Math.random()*(seaFloorDepth-winchY-40)+winchY+20;
-                                sealDist = distance(targetX, targetY, sealX, sealY);
-                            }
+                                sealDist = Math.abs(newTargetY-sealY);
+                            } 
                         }
-                        
+                            
                     } else {
                         if(sealHasBall){
                             sealX = sealX-3*sealSpeed;
@@ -711,11 +711,14 @@
                     var newTargetY = generateTargetLocationY();
                     var targetDistance = distance(newTargetX, newTargetY, targetX, targetY);
                     var maxTargetDistance = (motorSpeed*maxTime/(stepTime/1000)) - 20;
-                    console.log(maxTargetDistance);
-                    while ((targetDistance < 100) || (targetDistance > maxTargetDistance)){
+                    //console.log(maxTargetDistance);
+                    var sealDist = Math.abs(newTargetY-sealY);
+                
+                    while ((targetDistance < 100) || (targetDistance > maxTargetDistance) || (sealDist < 50)){
                         newTargetX = generateTargetLocationX();
                         newTargetY = generateTargetLocationY();
                         targetDistance = distance(newTargetX, newTargetY, targetX, targetY);
+                        sealDist = Math.abs(newTargetY-sealY);
                         
                     }
                     targetX = newTargetX;
@@ -789,11 +792,18 @@
                     count = count + 1;
                 } else {
                     failReason = outOfTimeFail;
+                    failedFlag = true;
                     failed();
                 }
                 
             } else {
                 calculateWinch();
+                if((winchY+ballY) > seaFloorDepth){
+                    failed();
+                    failedFlag = true;
+
+                    failReason = hitBottomFail;
+                }
                 calculateSeal();
                 drawBackground();
                 drawOcean();
@@ -808,10 +818,10 @@
                 drawSeaFloor();
                 if(checkInTarget()){
                     drawTargetAreaGreen();
-                    console.log(currentStationaryTime);
+                    //console.log(currentStationaryTime);
                     if(stationaryTimeTarget <= currentStationaryTime){
                         sonarPulsing = true;
-                        console.log("Time Left: "+timeLeft);
+                        //console.log("Time Left: "+timeLeft);
                         score = score+ 10 + Math.floor(timeLeft);
                         count = count + 1;
                     }
