@@ -594,6 +594,13 @@
           ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
           textY = textY + lineSpacing;
 
+          ctx.font = "8px Arial";
+          ctx.fillStyle = "#FFFFFF";
+          textString = "Will Rigby, Polar Tech Design Team";
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width-3-textWidth, canvas.height-3);
+          textY = textY + lineSpacing;
+
 
         }
 

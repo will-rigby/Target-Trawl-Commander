@@ -170,6 +170,30 @@
           ctx.fillText(textString, canvas.width/2-textWidth/2, 180);
 
           drawSeal(canvas.width/4, 3*canvas.height/4);
+
+          textString = "Left Winch"
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width/4-textWidth/2, 5*canvas.height/8);
+
+          textString = "Right Winch"
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, 3*canvas.width/4-textWidth/2, 5*canvas.height/8);
+          
+          ctx.font = "28px Impact";
+          textString = "W/S"
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width/4-textWidth/2, 5*canvas.height/8+30);
+
+          textString = "Up/Down"
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, 3*canvas.width/4-textWidth/2, 5*canvas.height/8+30);
+
+          ctx.font = "8px Arial";
+          ctx.fillStyle = "#FFFFFF";
+          textString = "Will Rigby, Polar Tech Design Team";
+          textWidth = ctx.measureText(textString ).width;
+          ctx.fillText(textString, canvas.width-3-textWidth, canvas.height-3);
+          textY = textY + lineSpacing;
 /*
           var textY = 300;
           var lineSpacing = 30;
