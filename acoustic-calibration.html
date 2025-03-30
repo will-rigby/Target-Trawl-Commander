@@ -119,6 +119,7 @@
                     reset = true;
                 }
             }
+            e.preventDefault();
         }
 
         function keyUpHandler(e) {
@@ -132,7 +133,7 @@
             } else if(e.code == 'KeyS'){
                 sKeyPressed = false;
             }
-            
+            e.preventDefault();
         }
 
         function calculateIntersectX(r1, r2, d){
