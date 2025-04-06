@@ -18,6 +18,7 @@
   <body>
     <canvas id="myCanvas" width="960" height="640"></canvas>
     <script>
+
         const canvas = document.getElementById("myCanvas");
         const ctx = canvas.getContext("2d");
         var started = false;
@@ -34,18 +35,26 @@
         
 
         var shipX = 905;
-        var shipY = 600;
+        var shipY = 550;
         var shipSpeed = 0.0;
         var maxShipSpeed = 1.0;
         var sideVelocity = 0.0;
         var maxSideVelocity = 0.25;
         var thrustAcceleration = 0.005;
-        var shipHeading = Math.PI;
+        var shipHeading = 270*Math.PI/180;
         var shipLength = 40;
         var steeringRate = 0;
         var maxSteeringRateMin = 0.005;
-        var steeringAcceleration = 0.001;
-        var steeringLimit = 0.02;
+        var steeringAcceleration = 0.0005;
+        var steeringLimit = 0.01;
+
+        var windSpeed = 0.3;
+        var windHeading = 90;
+        var windParticleCount = 200;
+        var windParticles = [];
+        for(var i = 0; i < windParticleCount; i++){
+          windParticles[i] = [Math.random()*canvas.width, Math.random()*canvas.height];
+        }
 
        
         var sternX = shipX - shipLength*Math.sin(shipHeading);
@@ -100,6 +109,7 @@
             }
             
           }
+          e.preventDefault();
         }
 
         function keyUpHandler(e) {
@@ -117,6 +127,7 @@
             } else if (e.code == "ArrowUp"){
               upPressed = false;
             }
+            e.preventDefault();
         }
 
         function orientation3Exact(m0, m1, m2) {
@@ -368,13 +379,13 @@
               }
             }
           }
-          shipHeading = shipHeading + steeringRate;
+          shipHeading = shipHeading + steeringRate*(shipSpeed/maxShipSpeed);
           
           /* Calculate Speed */
           if(downPressed){
             shipSpeed = shipSpeed - thrustAcceleration;
-            if(Math.abs(shipSpeed) > (maxShipSpeed*0.5){
-              shipSpeed = -0.5*maxShipSpeed;
+            if(shipSpeed < (maxShipSpeed*-0.3)){
+              shipSpeed = -0.3*maxShipSpeed;
             }
           } else if (upPressed){
             shipSpeed = shipSpeed + thrustAcceleration;
@@ -383,8 +394,38 @@
             }
           }
 
-          shipX = shipX + shipSpeed*Math.sin(shipHeading);
-          shipY = shipY + shipSpeed*Math.cos(shipHeading);
+          /* Calculate side speed */
+          if(aPressed && !dPressed){
+            sideVelocity = sideVelocity - thrustAcceleration;
+            if(sideVelocity < (-maxSideVelocity)){
+              sideVelocity = -maxSideVelocity;
+            }
+          } else if (dPressed && !aPressed){
+            sideVelocity = sideVelocity + thrustAcceleration;
+            if(sideVelocity > maxSideVelocity){
+              sideVelocity = maxSideVelocity;
+            }
+          } else {
+            if(sideVelocity > 0){
+              sideVelocity = sideVelocity - (thrustAcceleration*0.25);
+              if(sideVelocity < 0){
+                sideVelocity = 0;
+              }
+            } else if (sideVelocity < 0){
+              sideVelocity = sideVelocity + (thrustAcceleration*0.25);
+              if (sideVelocity > 0){
+                sideVelocity = 0;
+              }
+            }
+          }
+
+          shipXVelocity = shipSpeed*Math.sin(shipHeading) - sideVelocity*Math.cos(shipHeading);
+          shipYVelocity = shipSpeed*Math.cos(shipHeading) - sideVelocity*Math.sin(shipHeading);
+          windAccelX =  windSpeed*Math.cos(windHeading/180*Math.PI+Math.PI/2) - shipXVelocity;
+          windAccelY = windSpeed*Math.sin(windHeading/180*Math.PI+Math.PI/2) - shipYVelocity;
+          console.log(windSpeed, shipXVelocity, shipYVelocity, windAccelX, windAccelY, shipSpeed)
+          shipX = shipX + shipSpeed*Math.sin(shipHeading) - sideVelocity*Math.cos(shipHeading) + windAccelX;
+          shipY = shipY + shipSpeed*Math.cos(shipHeading) - sideVelocity*Math.sin(shipHeading) + windAccelY;
           sternX = shipX - shipLength*Math.sin(shipHeading);
           sternY = shipY - shipLength*Math.cos(shipHeading);
 
@@ -401,69 +442,10 @@
           }
         }
 
-        function calculateNetMotion(){
-          var oldNetY = netY;
-          var oldNetX = netX;
-          var oldDistance = distance(netX, netY, sternX, sternY);
-          dY = netY-sternY;
-          dX = netX-sternX;
-          netHeading = Math.atan2(dX,dY);
-          netX = sternX+wireLength*Math.sin(netHeading);
-          netY = sternY+wireLength*Math.cos(netHeading);
-          if(distance(netX, netY, sternX, sternY) > oldDistance){
-            netX = oldNetX;
-            netY = oldNetY;
-          }
-        }
 
-        function calculateIceBergs(){
-          for(var i = 0; i < iceBergCount; i++){
-            iceBergs[i].simStep();
-          }
-        }
-
-        function generateKrillDrawXYs(){
-          
-          var krillCount = 0;
-          while(krillCount < krillNumber){
-            var x = (Math.random()*(2*krillRadius))-krillRadius;
-            var y = (Math.random()*(2*krillRadius))-krillRadius;
-            if(Math.sqrt(x*x+y*y) < krillRadius){
-              
-              krillDrawXYs[krillCount] = [x,y];
-              krillCount+=1;
-            }
-          }
-
-        }
-
-        
 
         function distance(x1, y1, x2, y2){
           return Math.sqrt((x1-x2)**2+(y1-y2)**2);
-        }
-
-
-
-
-
-        function detectOutsidePermitZone(){
-          if((shipX < 0)||(shipX > canvas.width)||(shipY<0)||(shipY>canvas.height)){
-            return true;
-          } else if ((sternX < 0)||(sternX > canvas.width)||(sternY<0)||(sternY>canvas.height)){
-            return true;
-          } else {
-            return false;
-          }
-        }
-
-        function iceBergCollision(){
-          for(var i = 0; i < iceBergCount; i++){
-            if(iceBergCollisionDetection(iceBergs[i])){
-              return true;
-            }
-          }
-          return false;
         }
 
         function drawHobartCity(){
@@ -474,6 +456,19 @@
             ctx.lineTo(hobartCity[index][0], hobartCity[index][1]);
           }
           ctx.closePath();
+          ctx.fill();
+        }
+
+        function drawThrottle(){
+          var throttleX = 50;
+          var throttleY = canvas.height-50;
+          var throttleRadius = 30;
+          var stuckRadius = 50;
+          var stickKnobRadius = 5;
+          ctx.beginPath();
+          ctx.arc(throttleX, throttleY, throttleRadius, 0, Math.PI);
+          ctx.closePath();
+          ctx.fillStyle() = ""
           ctx.fill();
         }
 
@@ -629,6 +624,19 @@
           ctx.fillText(textString, canvas.width/2-textWidth/2, 200);
         }
 
+        function drawWind(){
+          for(var i = 0; i < windParticleCount; i++){
+            ctx.beginPath();
+            ctx.moveTo(windParticles[i][0], windParticles[i][1]);
+            x1 = windParticles[i][0]-30*windSpeed*Math.cos(windHeading/180*Math.PI+Math.PI/2);
+            y1 = windParticles[i][1]-30*windSpeed*Math.sin(windHeading/180*Math.PI+Math.PI/2);
+            ctx.lineTo(x1,y1);
+            ctx.closePath();
+            ctx.strokeStyle = "#FFFFFF";
+            ctx.stroke();
+          }
+        }
+
         function drawIceBergCollision(){
           ctx.font = "32px Impact";
           
@@ -657,6 +665,28 @@
           ctx.fillText(textString, canvas.width/2-textWidth/2, 390);
         }
 
+        function calculateWind(){
+          for(var i = 0; i < windParticleCount; i++){
+            
+            windParticles[i][0] = windParticles[i][0]-5*windSpeed*Math.cos(windHeading/180*Math.PI+Math.PI/2);
+            windParticles[i][1] = windParticles[i][1]-5*windSpeed*Math.sin(windHeading/180*Math.PI+Math.PI/2);
+            if(windParticles[i][0] < 0){
+              windParticles[i][0] = canvas.width;
+              windParticles[i][1] = Math.random()*canvas.height;
+            } else if(windParticles[i][0] > canvas.width){
+              windParticles[i][0] = 0;
+              windParticles[i][1] = Math.random()*canvas.height;
+            } else if(windParticles[i][1] < 0){
+              windParticles[i][0] = Math.random() * canvas.width;
+              windParticles[i][1] = canvas.height;
+            } else if(windParticles[i][1] > canvas.height){
+              windParticles[i][0] = Math.random()*canvas.height;
+              windParticles[i][1] = 0;
+            }
+            
+          }
+        }
+
         function resetGame(){
           
         }
@@ -668,9 +698,13 @@
             ctx.rect(0, 0, canvas.width, canvas.height);
             ctx.fillStyle = "#0042C2";
             ctx.fill();
+            calculateShipMotion();
+            calculateWind();
         
             drawHobartCity();
             drawRosny();
+            drawShip();
+            drawWind();
               //document.location.reload();
             
             
