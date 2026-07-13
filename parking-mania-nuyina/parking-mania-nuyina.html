@@ -1,867 +1,1241 @@
-<!doctype html>
-<html lang="en-US">
-  <head>
-    <meta charset="utf-8" />
-    <title>Parking Mania Nuyina</title>
-    <style>
-      * {
-        padding: 0;
-        margin: 0;
-      }
-      canvas {
-        background: #eee;
-        display: block;
-        margin: 0 auto;
-      }
-    </style>
-  </head>
-  <body>
-    <canvas id="myCanvas" width="960" height="640"></canvas>
-    <script>
+<!DOCTYPE html>
+<html>
 
+<head>
+    <meta charset="utf-8">
+    <title>Parking Mania: Nuyina</title>
+    <style>
+        * {
+            padding: 0;
+            margin: 0;
+        }
+
+        canvas {
+            background: #eee;
+            display: block;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="myCanvas" width="960" height="640"></canvas>
+
+    <script src="hobart-terrain.js"></script>
+    <script>
         const canvas = document.getElementById("myCanvas");
         const ctx = canvas.getContext("2d");
-        var started = false;
-        var reset = false;
 
-        var EPSILON     = 1.1102230246251565e-16
-        var ERRBOUND3   = (3.0 + 16.0 * EPSILON) * EPSILON
-        var ERRBOUND4   = (7.0 + 56.0 * EPSILON) * EPSILON
+        /* Show script errors on the page instead of failing silently. */
+        window.onerror = function(msg, src, line) {
+          var div = document.createElement("div");
+          div.className = "game-error";
+          div.style.cssText = "color:#fff;background:#a00;font:14px monospace;padding:6px;";
+          div.textContent = "ERROR: " + msg + " (line " + line + ")";
+          document.body.appendChild(div);
+        };
 
-        const hobartCity = generateHobartCity();
-        const rosny = generateRosny();
+        if (typeof HOBART_TERRAIN !== "object") {
+          throw new Error("hobart-terrain.js not loaded - run tools/build_terrain.py");
+        }
 
-        console.log(hobartCity);
-        
+        /* ================= tuning constants =================
+           World units are METERS (from hobart-terrain.js), y down, north up.
+           Headings are compass: 0 = north, positive clockwise.
+           Forces in kN, mass in tonnes, so kN/t = m/s^2 directly. */
+        const DT = 0.1;                  // s of ship time per 20 ms frame (5x time compression)
+        const PXPM = 0.6;                 // px per meter (camera zoom)
+        const SHIP_LEN = 160, SHIP_BEAM = 25.6;
+        const MASS = 25600;               // t
+        const IZZ = 2.0e7;                // t*m^2 (reduced from physical for playable yaw)
+        const THRUST_AHEAD = 3600;        // kN, top speed ~6.8 m/s (~13 kn)
+        const THRUST_ASTERN = 1800;       // kN
+        const THROTTLE_RATE = 0.5;        // fraction per second
+        const AZIMUTH_MAX = 0.6;          // rad (~35 deg)
+        const AZIMUTH_RATE = 0.5;         // rad/s
+        const THRUSTER_F = 700;           // kN, bow & stern tunnel thrusters
+        const POD_FLOW_K = 35;            // kN/(m/s)^2, rudder lift on deflected pods while coasting
+        const BOW_ARM = 65, STERN_ARM = 70; // m, lever arms from midships
+        const DRAG_U1 = 40, DRAG_U2 = 72;       // surge drag kN/(m/s), kN/(m/s)^2
+        const DRAG_V1 = 200, DRAG_V2 = 600;     // sway drag
+        const DRAG_R1 = 1.5e6, DRAG_R2 = 2e8;   // yaw drag
+        const WIND_K = 2.5;               // kN/(m/s)^2 of wind speed
+        const HOLD_TIME = 3.0;            // s inside the berth to win
+        const BERTH_MAX_SPEED = 0.5;      // m/s over ground
+        const BERTH_MAX_YAWRATE = 0.3 * Math.PI / 180; // rad/s
+        const HEADING_TOL = 8;            // deg either way alongside
+        const WIND_PARTICLE_COUNT = 220;
+        const CURRENT_PARTICLE_COUNT = 140;
+        const CURRENT_VIS_SCALE = 4;      // exaggerate drift speed so the layer reads on screen
 
-        var shipX = 905;
-        var shipY = 550;
-        var shipSpeed = 0.0;
-        var maxShipSpeed = 1.0;
-        var sideVelocity = 0.0;
-        var maxSideVelocity = 0.25;
-        var thrustAcceleration = 0.005;
-        var shipHeading = 270*Math.PI/180;
-        var shipLength = 40;
-        var steeringRate = 0;
-        var maxSteeringRateMin = 0.005;
-        var steeringAcceleration = 0.0005;
-        var steeringLimit = 0.01;
+        /* ================= Tasman Bridge pylons =================
+           Hand-placed from the OSM bridge centerline: the over-water span runs
+           from BRIDGE_E (east) along BRIDGE_U; water is s = -170..875 m.
+           Navigation span pylons at s = 300.5 / 404.5 leave a ~94 m clear gap
+           (the real main span is 94.5 m); side pylons every 64 m to the shores. */
+        const BRIDGE_E = [4333.1, 3505.5];
+        const BRIDGE_U = [-0.99333, 0.11533];  // unit vector, east end -> west end
+        const BRIDGE_P = [-0.11533, -0.99333]; // perpendicular (upstream)
+        const PYLON_S = [-147.5, -83.5, -19.5, 44.5, 108.5, 172.5, 236.5, 300.5,
+                         404.5, 468.5, 532.5, 596.5, 660.5, 724.5, 788.5, 852.5];
+        const PYLONS = PYLON_S.map(function(s, i) {
+          var cx = BRIDGE_E[0] + BRIDGE_U[0] * s, cy = BRIDGE_E[1] + BRIDGE_U[1] * s;
+          var a = 5, b = 12; // half-width along bridge, half-length along stream
+          var pts = [
+            [cx + BRIDGE_U[0] * a + BRIDGE_P[0] * b, cy + BRIDGE_U[1] * a + BRIDGE_P[1] * b],
+            [cx - BRIDGE_U[0] * a + BRIDGE_P[0] * b, cy - BRIDGE_U[1] * a + BRIDGE_P[1] * b],
+            [cx - BRIDGE_U[0] * a - BRIDGE_P[0] * b, cy - BRIDGE_U[1] * a - BRIDGE_P[1] * b],
+            [cx + BRIDGE_U[0] * a - BRIDGE_P[0] * b, cy + BRIDGE_U[1] * a - BRIDGE_P[1] * b],
+          ];
+          return { name: "pylon-" + i, pts: pts, bbox: bboxOf(pts) };
+        });
 
-        var windSpeed = 0.3;
-        var windHeading = 90;
-        var windParticleCount = 200;
+        /* ================= levels =================
+           Berth rects sit 20 m off the real OSM quay faces (Macquarie Wharf and
+           the Selfs Point fuel pier). hdg in compass degrees along the quay. */
+        const LEVELS = [
+          { name: "Level 1 - Macquarie 2",
+            brief: "A calm morning on the Derwent. Bring her alongside Macquarie Wharf No. 2, dead slow.",
+            start: { x: 4600, y: 5850, hdg: 315 },
+            berth: { cx: 3801.0, cy: 5172.5, hdg: 351.6, len: 180, wid: 32 },
+            wind: { speed: 2, from: 315, gust: false },
+            current: { speed: 0, to: 170 } },
+          { name: "Level 2 - Macquarie 3",
+            brief: "A fresh northerly is blowing down the river. Hold your line onto Macquarie 3.",
+            start: { x: 4600, y: 5850, hdg: 315 },
+            berth: { cx: 3827.6, cy: 5350.5, hdg: 351.6, len: 180, wid: 32 },
+            wind: { speed: 6, from: 0, gust: false },
+            current: { speed: 0, to: 170 } },
+          { name: "Level 3 - Macquarie 4",
+            brief: "Round Macquarie Point into Sullivans Cove. The sou'easter will push you onto the wharf.",
+            start: { x: 4400, y: 5950, hdg: 300 },
+            berth: { cx: 3725.6, cy: 5492.9, hdg: 79.6, len: 170, wid: 30 },
+            wind: { speed: 8, from: 135, gust: false },
+            current: { speed: 0.2, to: 170 } },
+          { name: "Level 4 - Macquarie 5",
+            brief: "A strong westerly is blowing you off the berth. Work the thrusters.",
+            start: { x: 4400, y: 4500, hdg: 240 },
+            berth: { cx: 3804.9, cy: 4951.8, hdg: 351.4, len: 180, wid: 32 },
+            wind: { speed: 10, from: 270, gust: false },
+            current: { speed: 0.3, to: 170 } },
+          { name: "Level 5 - Home berth: Macquarie 6",
+            brief: "Home berth, deep in Sullivans Cove. Gusty nor'wester between the sheds. Thread her in.",
+            start: { x: 4400, y: 5950, hdg: 300 },
+            berth: { cx: 3592.8, cy: 5517.3, hdg: 79.6, len: 170, wid: 30 },
+            wind: { speed: 12, from: 315, gust: true },
+            current: { speed: 0.2, to: 150 } },
+          { name: "Level 6 - The fuel run: Selfs Point",
+            brief: "North under the Tasman Bridge - the main span only - then berth on the outer face of the Selfs Point jetty head. Mind the current.",
+            start: { x: 4150, y: 3950, hdg: 340 },
+            berth: { cx: 2937.5, cy: 1305.2, hdg: 352.5, len: 185, wid: 30 },
+            wind: { speed: 9, from: 270, gust: false },
+            current: { speed: 0.5, to: 173 } },
+        ];
+
+        /* ================= game state ================= */
+        var gameState = "title"; // title | intro | playing | crashed | berthed | complete
+        var levelIndex = 0;
+        var level = LEVELS[0];
+        var collidables = [];
+        var simTime = 0;
+        var holdTimer = 0;
+        var berthConditionsMet = false;
+        var camX = 0, camY = 0;
+        var debugOverlay = false; // C key: trajectory + orientation diagnostics
+
+        var ship = {
+          x: 0, y: 0,
+          heading: 0,      // rad, compass
+          u: 0, v: 0, r: 0, // surge m/s (+ahead), sway m/s (+stbd), yaw rad/s (+cw)
+          throttle: 0,     // -1..1
+          azimuth: 0,      // rad, + deflects thrust to starboard (bow swings port)
+          bowThr: 0, sternThr: 0, // -1 (port) / 0 / 1 (stbd)
+        };
+
+        /* hull outline in ship-local meters: x' starboard, y' forward, midships origin */
+        const SHIP_HULL = [
+          [0, 80], [10, 62], [12.8, 40], [12.8, -68], [8, -80],
+          [-8, -80], [-12.8, -68], [-12.8, 40], [-10, 62]
+        ];
+
         var windParticles = [];
-        for(var i = 0; i < windParticleCount; i++){
-          windParticles[i] = [Math.random()*canvas.width, Math.random()*canvas.height];
-        }
+        for (var i = 0; i < WIND_PARTICLE_COUNT; i++) windParticles.push([0, 0]);
 
-       
-        var sternX = shipX - shipLength*Math.sin(shipHeading);
-        var sternY = shipY - shipLength*Math.cos(shipHeading);
-        
+        /* current streaks: [x, y, shimmer phase] */
+        var currentParticles = [];
+        for (var i = 0; i < CURRENT_PARTICLE_COUNT; i++) currentParticles.push([0, 0, Math.random() * Math.PI * 2]);
 
-        var score = 0;
-        var leftPressed = false;
-        var rightPressed = false;
-        var aPressed = false;
-        var dPressed = false;
-        var downPressed = false;
-        var upPressed = false;
-
-        var wake=[]
-        var wakeLength = 60;
-        for(var i = 0; i < wakeLength; i++){
-          wake[i] = [shipX, shipY+shipLength];
-        }
+        var wake = [];
+        const WAKE_LENGTH = 60, WAKE_EVERY = 12; // frames between samples
         var wakeCounter = 0;
-        var wakeThreshold = 5;
 
-        var iceBergCount = 0;
-        var iceBergs = [];
-        var iceBergSpeed = 3;
-
+        /* ================= input ================= */
+        var wPressed = false, sPressed = false, aPressed = false, dPressed = false;
+        var upPressed = false, downPressed = false, leftPressed = false, rightPressed = false;
+        var bowPort = false, bowStbd = false, sternPort = false, sternStbd = false;
 
         document.addEventListener("keydown", keyDownHandler, false);
         document.addEventListener("keyup", keyUpHandler, false);
 
-        
+        const GAME_KEYS = ["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+          "KeyW", "KeyS", "KeyA", "KeyD", "KeyI", "KeyO", "KeyK", "KeyL", "KeyX", "KeyR",
+          "KeyC", "Numpad7", "Numpad9", "Numpad1", "Numpad3"];
 
         function keyDownHandler(e) {
-          if(e.code  == "ArrowRight") {
-              rightPressed = true;
+          if (e.code == "KeyW") { wPressed = true; }
+          else if (e.code == "KeyS") { sPressed = true; }
+          else if (e.code == "KeyA") { aPressed = true; }
+          else if (e.code == "KeyD") { dPressed = true; }
+          else if (e.code == "ArrowUp") { upPressed = true; }
+          else if (e.code == "ArrowDown") { downPressed = true; }
+          else if (e.code == "ArrowLeft") { leftPressed = true; }
+          else if (e.code == "ArrowRight") { rightPressed = true; }
+          else if (e.code == "KeyI" || e.code == "Numpad7") { bowPort = true; }
+          else if (e.code == "KeyO" || e.code == "Numpad9") { bowStbd = true; }
+          else if (e.code == "KeyK" || e.code == "Numpad1") { sternPort = true; }
+          else if (e.code == "KeyL" || e.code == "Numpad3") { sternStbd = true; }
+          else if (e.code == "KeyX") { ship.throttle = 0; ship.azimuth = 0; }
+          else if (e.code == "KeyC") { debugOverlay = !debugOverlay; }
+          else if (e.code == "KeyR") { if (gameState == "playing") resetLevel(); }
+          else if (e.code == "Space") { handleSpace(); }
+          else if (e.code.slice(0, 5) == "Digit") {
+            var n = parseInt(e.code.slice(5), 10);
+            if (n >= 1 && n <= LEVELS.length) startLevel(n - 1);
           }
-          else if(e.code == 'ArrowLeft') {
-              leftPressed = true;
-          } else if(e.code == 'KeyA'){
-            aPressed = true;
-          } else if(e.code == 'KeyD'){
-            dPressed = true;
-          } else if (e.code == "ArrowDown"){
-            downPressed = true;
-          } else if (e.code == "ArrowUp"){
-            upPressed = true;
-          } else if(e.code == 'Space'){
-            if(!started){
-              started = true;
-            } else{
-              reset = true;
-            }
-            
-          }
-          e.preventDefault();
+          if (GAME_KEYS.indexOf(e.code) >= 0) e.preventDefault();
         }
 
         function keyUpHandler(e) {
-            if(e.code  == "ArrowRight") {
-                rightPressed = false;
-            }
-            else if(e.code == 'ArrowLeft') {
-                leftPressed = false;
-            } else if (e.code == "KeyA"){
-              aPressed = false;
-            } else if (e.code == "KeyD"){
-              dPressed = false;
-            } else if (e.code == "ArrowDown"){
-              downPressed = false;
-            } else if (e.code == "ArrowUp"){
-              upPressed = false;
-            }
-            e.preventDefault();
+          if (e.code == "KeyW") { wPressed = false; }
+          else if (e.code == "KeyS") { sPressed = false; }
+          else if (e.code == "KeyA") { aPressed = false; }
+          else if (e.code == "KeyD") { dPressed = false; }
+          else if (e.code == "ArrowUp") { upPressed = false; }
+          else if (e.code == "ArrowDown") { downPressed = false; }
+          else if (e.code == "ArrowLeft") { leftPressed = false; }
+          else if (e.code == "ArrowRight") { rightPressed = false; }
+          else if (e.code == "KeyI" || e.code == "Numpad7") { bowPort = false; }
+          else if (e.code == "KeyO" || e.code == "Numpad9") { bowStbd = false; }
+          else if (e.code == "KeyK" || e.code == "Numpad1") { sternPort = false; }
+          else if (e.code == "KeyL" || e.code == "Numpad3") { sternStbd = false; }
+          if (GAME_KEYS.indexOf(e.code) >= 0) e.preventDefault();
         }
 
-        function orientation3Exact(m0, m1, m2) {
-          var p = sum(sum(prod(m1[1], m2[0]), prod(-m2[1], m1[0])), sum(prod(m0[1], m1[0]), prod(-m1[1], m0[0])))
-          var n = sum(prod(m0[1], m2[0]), prod(-m2[1], m0[0]))
-          var d = sub(p, n)
-          return d[d.length - 1]
+        function handleSpace() {
+          if (gameState == "title") { startLevel(0); }
+          else if (gameState == "intro") { gameState = "playing"; }
+          else if (gameState == "playing") { ship.throttle = 0; ship.azimuth = 0; }
+          else if (gameState == "crashed") { resetLevel(); }
+          else if (gameState == "berthed") {
+            if (levelIndex + 1 < LEVELS.length) startLevel(levelIndex + 1);
+            else gameState = "complete";
+          }
+          else if (gameState == "complete") { gameState = "title"; }
+        }
+
+        /* Level-design aid: click anywhere to log world meters + lat/lon. */
+        canvas.addEventListener("click", function(e) {
+          var wx = (e.offsetX - canvas.width / 2) / PXPM + camX;
+          var wy = (e.offsetY - canvas.height / 2) / PXPM + camY;
+          var m = HOBART_TERRAIN.meta;
+          console.log("world x=" + wx.toFixed(1) + " y=" + wy.toFixed(1) +
+            "  lat=" + (m.origin.lat - wy / m.mPerDegLat).toFixed(5) +
+            " lon=" + (m.origin.lon + wx / m.mPerDegLon).toFixed(5));
+        });
+
+        /* ================= geometry helpers ================= */
+        function bboxOf(pts) {
+          var minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+          for (var i = 0; i < pts.length; i++) {
+            if (pts[i][0] < minx) minx = pts[i][0];
+            if (pts[i][1] < miny) miny = pts[i][1];
+            if (pts[i][0] > maxx) maxx = pts[i][0];
+            if (pts[i][1] > maxy) maxy = pts[i][1];
+          }
+          return [minx, miny, maxx, maxy];
+        }
+
+        function bboxOverlap(a, b) {
+          return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
+        }
+
+        function distance(x1, y1, x2, y2) {
+          return Math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2);
+        }
+
+        function angDiffDeg(a, b) {
+          return ((a - b + 540) % 360) - 180;
+        }
+
+        function compassName(deg) {
+          var names = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+          return names[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
         }
 
         function orientation3(a, b, c) {
-          var l = (a[1] - c[1]) * (b[0] - c[0])
-          var r = (a[0] - c[0]) * (b[1] - c[1])
-          var det = l - r
-          var s
-          if(l > 0) {
-            if(r <= 0) {
-              return det
-            } else {
-              s = l + r
-            }
-          } else if(l < 0) {
-            if(r >= 0) {
-              return det
-            } else {
-              s = -(l + r)
-            }
-          } else {
-            return det
-          }
-          var tol = ERRBOUND3 * s
-          if(det >= tol || det <= -tol) {
-            return det
-          }
-          return orientation3Exact(a, b, c)
+          return (a[1] - c[1]) * (b[0] - c[0]) - (a[0] - c[0]) * (b[1] - c[1]);
         }
 
+        /* Point-in-polygon (adapted from trawl-commander's robust version,
+           minus the exact-arithmetic branch): -1 inside, 0 on boundary, 1 outside. */
         function robustPointInPolygon(vs, point) {
-          var x = point[0]
-          var y = point[1]
-          var n = vs.length
-          var inside = 1
-          var lim = n
-          for(var i = 0, j = n-1; i<lim; j=i++) {
-            var a = vs[i]
-            var b = vs[j]
-            var yi = a[1]
-            var yj = b[1]
-            if(yj < yi) {
-              if(yj < y && y < yi) {
-                var s = orientation3(a, b, point)
-                if(s === 0) {
-                  return 0
-                } else {
-                  inside ^= (0 < s)|0
-                }
-              } else if(y === yi) {
-                var c = vs[(i+1)%n]
-                var yk = c[1]
-                if(yi < yk) {
-                  var s = orientation3(a, b, point)
-                  if(s === 0) {
-                    return 0
-                  } else {
-                    inside ^= (0 < s)|0
-                  }
+          var x = point[0], y = point[1];
+          var n = vs.length;
+          var inside = 1;
+          var lim = n;
+          for (var i = 0, j = n - 1; i < lim; j = i++) {
+            var a = vs[i], b = vs[j];
+            var yi = a[1], yj = b[1];
+            if (yj < yi) {
+              if (yj < y && y < yi) {
+                var s = orientation3(a, b, point);
+                if (s === 0) return 0;
+                inside ^= (0 < s) | 0;
+              } else if (y === yi) {
+                var c = vs[(i + 1) % n];
+                if (yi < c[1]) {
+                  var s = orientation3(a, b, point);
+                  if (s === 0) return 0;
+                  inside ^= (0 < s) | 0;
                 }
               }
-            } else if(yi < yj) {
-              if(yi < y && y < yj) {
-                var s = orientation3(a, b, point)
-                if(s === 0) {
-                  return 0
-                } else {
-                  inside ^= (s < 0)|0
-                }
-              } else if(y === yi) {
-                var c = vs[(i+1)%n]
-                var yk = c[1]
-                if(yk < yi) {
-                  var s = orientation3(a, b, point)
-                  if(s === 0) {
-                    return 0
-                  } else {
-                    inside ^= (s < 0)|0
-                  }
+            } else if (yi < yj) {
+              if (yi < y && y < yj) {
+                var s = orientation3(a, b, point);
+                if (s === 0) return 0;
+                inside ^= (s < 0) | 0;
+              } else if (y === yi) {
+                var c = vs[(i + 1) % n];
+                if (c[1] < yi) {
+                  var s = orientation3(a, b, point);
+                  if (s === 0) return 0;
+                  inside ^= (s < 0) | 0;
                 }
               }
-            } else if(y === yi) {
-              var x0 = Math.min(a[0], b[0])
-              var x1 = Math.max(a[0], b[0])
-              if(i === 0) {
-                while(j>0) {
-                  var k = (j+n-1)%n
-                  var p = vs[k]
-                  if(p[1] !== y) {
-                    break
-                  }
-                  var px = p[0]
-                  x0 = Math.min(x0, px)
-                  x1 = Math.max(x1, px)
-                  j = k
+            } else if (y === yi) {
+              var x0 = Math.min(a[0], b[0]);
+              var x1 = Math.max(a[0], b[0]);
+              if (i === 0) {
+                while (j > 0) {
+                  var k = (j + n - 1) % n;
+                  var p = vs[k];
+                  if (p[1] !== y) break;
+                  x0 = Math.min(x0, p[0]);
+                  x1 = Math.max(x1, p[0]);
+                  j = k;
                 }
-                if(j === 0) {
-                  if(x0 <= x && x <= x1) {
-                    return 0
-                  }
-                  return 1 
+                if (j === 0) {
+                  if (x0 <= x && x <= x1) return 0;
+                  return 1;
                 }
-                lim = j+1
+                lim = j + 1;
               }
-              var y0 = vs[(j+n-1)%n][1]
-              while(i+1<lim) {
-                var p = vs[i+1]
-                if(p[1] !== y) {
-                  break
-                }
-                var px = p[0]
-                x0 = Math.min(x0, px)
-                x1 = Math.max(x1, px)
-                i += 1
+              var y0 = vs[(j + n - 1) % n][1];
+              while (i + 1 < lim) {
+                var p = vs[i + 1];
+                if (p[1] !== y) break;
+                x0 = Math.min(x0, p[0]);
+                x1 = Math.max(x1, p[0]);
+                i += 1;
               }
-              if(x0 <= x && x <= x1) {
-                return 0
-              }
-              var y1 = vs[(i+1)%n][1]
-              if(x < x0 && (y0 < y !== y1 < y)) {
-                inside ^= 1
-              }
+              if (x0 <= x && x <= x1) return 0;
+              var y1 = vs[(i + 1) % n][1];
+              if (x < x0 && (y0 < y !== y1 < y)) inside ^= 1;
             }
           }
-          return 2 * inside - 1
+          return 2 * inside - 1;
         }
 
-        function generateShipVertices(){
-          var vertices = []
-          vertices[0] = [0,0];
-          vertices[1] = [4,-4];
-          vertices[2] = [4,-shipLength];
-          vertices[3] = [-4,-shipLength];
-          vertices[4] = [-4,-4];
-          for(var i = 0; i < 5; i++){
-            vertices[i] = [vertices[i][0]*Math.cos(-shipHeading)-vertices[i][1]*Math.sin(-shipHeading), vertices[i][1]*Math.cos(-shipHeading)+vertices[i][0]*Math.sin(-shipHeading)];
-            vertices[i] = [vertices[i][0] + shipX, vertices[i][1]+shipY];
-          }
-          return vertices;
+        function onSegment(p, q, r) { // q collinear with p-r: is q between?
+          return Math.min(p[0], r[0]) <= q[0] && q[0] <= Math.max(p[0], r[0]) &&
+                 Math.min(p[1], r[1]) <= q[1] && q[1] <= Math.max(p[1], r[1]);
         }
 
-        function iceBergToiceBergCollision(i, j){
-          if(distance(iceBergs[i].x, iceBergs[i].y, iceBergs[j].x, iceBergs[j].y) > 180){
-                return false;
-          }
-          var iceBergIVertices = [];
-          var iceBergJVertices = [];
-          for(var bergDex = 0; bergDex < iceBergs[j].verticesCount; bergDex++){
-            iceBergJVertices[bergDex] = [iceBergs[j].vertices[bergDex][0]+iceBergs[j].x, iceBergs[j].vertices[bergDex][1]+iceBergs[j].y]
-          }
-          for(var bergDex = 0; bergDex < iceBergs[i].verticesCount; bergDex++){
-            iceBergIVertices[bergDex] = [iceBergs[i].vertices[bergDex][0]+iceBergs[i].x, iceBergs[i].vertices[bergDex][1]+iceBergs[i].y]
-          }
-          for(var verticeIndex = 0; verticeIndex < iceBergs[i].verticesCount; verticeIndex++){
-            var collision = robustPointInPolygon(iceBergJVertices, iceBergIVertices[verticeIndex]);
-            //console.log(collision);
-            if(collision == -1 || collision == 0){
-              return true;
-            }
-          }
-          for(var verticeIndex = 0; verticeIndex < iceBergs[j].verticesCount; verticeIndex++){
-            var collision = robustPointInPolygon(iceBergIVertices, iceBergJVertices[verticeIndex]);
-            //console.log(collision);
-            if(collision == -1 || collision == 0){
-              return true;
-            }
-          }
+        function segSeg(p1, p2, p3, p4) {
+          var d1 = orientation3(p3, p4, p1);
+          var d2 = orientation3(p3, p4, p2);
+          var d3 = orientation3(p1, p2, p3);
+          var d4 = orientation3(p1, p2, p4);
+          if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+              ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+          if (d1 === 0 && onSegment(p3, p1, p4)) return true;
+          if (d2 === 0 && onSegment(p3, p2, p4)) return true;
+          if (d3 === 0 && onSegment(p1, p3, p2)) return true;
+          if (d4 === 0 && onSegment(p1, p4, p2)) return true;
           return false;
         }
 
-        function iceBergToIceBergCollisionCheck(){
-          for(var i = 0; i < iceBergCount; i++){
-            for(var j = i+1; j < iceBergCount; j++){
-              if(iceBergToiceBergCollision(i,j)){
-                var ixSpeed = iceBergs[i].xSpeed;
-                var iySpeed = iceBergs[i].ySpeed;
-                iceBergs[i].xSpeed = iceBergs[j].xSpeed;
-                iceBergs[i].ySpeed = iceBergs[j].ySpeed;
-                iceBergs[j].xSpeed = ixSpeed;
-                iceBergs[j].ySpeed = iySpeed;
-              }
-            }
-          }
-        }
-        
-        function iceBergCollisionDetection(iceBerg){
-          if(distance(shipX, shipY, iceBerg.x, iceBerg.y) > 180){
-            return false;
-          }
-          var shipVertices = generateShipVertices();
-          var collision = false;
-          iceBergCurrentVertices = [];
-          for(var i = 0; i < iceBerg.verticesCount; i++){
-            iceBergCurrentVertices[i] = [iceBerg.vertices[i][0]+iceBerg.x, iceBerg.vertices[i][1]+iceBerg.y]
-          }
-
-          for(var i = 0; i < 5; i++){
-            collision = robustPointInPolygon(iceBergCurrentVertices, shipVertices[i]);
-            //console.log(collision);
-            if(collision == -1 || collision == 0){
-              return true;
-            }
-          }
-          for(var i = 0; i < iceBerg.verticesCount; i++){
-            collision = robustPointInPolygon(shipVertices, iceBergCurrentVertices[i]);
-            //console.log(collision);
-            if(collision == -1 || collision == 0){
-              return true;
-            }
-          }
-
-          
-          return false;
+        /* ship-local (x' stbd, y' fwd) -> world */
+        function localToWorld(px, py) {
+          var h = ship.heading;
+          return [ship.x + px * Math.cos(h) + py * Math.sin(h),
+                  ship.y + px * Math.sin(h) - py * Math.cos(h)];
         }
 
-        function calculateShipMotion(){ 
-          /* Calculate steering */
-          if(leftPressed){
-            if(steeringRate < steeringLimit){
-              steeringRate = steeringRate + steeringAcceleration;
-              if(steeringRate > steeringLimit){
-                steeringRate = steeringLimit;
-              }
-            } 
-          } else if(rightPressed){
-            if(steeringRate > -steeringLimit){
-              steeringRate = steeringRate - steeringAcceleration;
-              if(steeringRate < -steeringLimit){
-                steeringRate = -steeringLimit;
-              }
-            } 
-          } else {
-            if (steeringRate > 0){
-              steeringRate = steeringRate - steeringAcceleration;
-              if (steeringRate < 0){
-                steeringRate = 0;
-              }
-            }
-            else if (steeringRate < 0){
-              steeringRate = steeringRate + steeringAcceleration;
-              if (steeringRate > 0){
-                steeringRate = 0;
-              }
-            }
+        function shipHullWorld() {
+          var pts = [];
+          for (var i = 0; i < SHIP_HULL.length; i++) {
+            pts.push(localToWorld(SHIP_HULL[i][0], SHIP_HULL[i][1]));
           }
-          shipHeading = shipHeading + steeringRate*(shipSpeed/maxShipSpeed);
-          
-          /* Calculate Speed */
-          if(downPressed){
-            shipSpeed = shipSpeed - thrustAcceleration;
-            if(shipSpeed < (maxShipSpeed*-0.3)){
-              shipSpeed = -0.3*maxShipSpeed;
-            }
-          } else if (upPressed){
-            shipSpeed = shipSpeed + thrustAcceleration;
-            if(shipSpeed > maxShipSpeed){
-              shipSpeed = maxShipSpeed;
-            }
-          }
+          return pts;
+        }
 
-          /* Calculate side speed */
-          if(aPressed && !dPressed){
-            sideVelocity = sideVelocity - thrustAcceleration;
-            if(sideVelocity < (-maxSideVelocity)){
-              sideVelocity = -maxSideVelocity;
-            }
-          } else if (dPressed && !aPressed){
-            sideVelocity = sideVelocity + thrustAcceleration;
-            if(sideVelocity > maxSideVelocity){
-              sideVelocity = maxSideVelocity;
-            }
-          } else {
-            if(sideVelocity > 0){
-              sideVelocity = sideVelocity - (thrustAcceleration*0.25);
-              if(sideVelocity < 0){
-                sideVelocity = 0;
-              }
-            } else if (sideVelocity < 0){
-              sideVelocity = sideVelocity + (thrustAcceleration*0.25);
-              if (sideVelocity > 0){
-                sideVelocity = 0;
-              }
-            }
-          }
+        function groundVelocity() {
+          var h = ship.heading;
+          var cd = level.current.to * Math.PI / 180;
+          var cs = level.current.speed;
+          return [ship.u * Math.sin(h) + ship.v * Math.cos(h) + cs * Math.sin(cd),
+                  -ship.u * Math.cos(h) + ship.v * Math.sin(h) - cs * Math.cos(cd)];
+        }
 
-          shipXVelocity = shipSpeed*Math.sin(shipHeading) - sideVelocity*Math.cos(shipHeading);
-          shipYVelocity = shipSpeed*Math.cos(shipHeading) - sideVelocity*Math.sin(shipHeading);
-          windAccelX =  windSpeed*Math.cos(windHeading/180*Math.PI+Math.PI/2) - shipXVelocity;
-          windAccelY = windSpeed*Math.sin(windHeading/180*Math.PI+Math.PI/2) - shipYVelocity;
-          console.log(windSpeed, shipXVelocity, shipYVelocity, windAccelX, windAccelY, shipSpeed)
-          shipX = shipX + shipSpeed*Math.sin(shipHeading) - sideVelocity*Math.cos(shipHeading) + windAccelX;
-          shipY = shipY + shipSpeed*Math.cos(shipHeading) - sideVelocity*Math.sin(shipHeading) + windAccelY;
-          sternX = shipX - shipLength*Math.sin(shipHeading);
-          sternY = shipY - shipLength*Math.cos(shipHeading);
+        function windSpeedNow() {
+          var w = level.wind;
+          if (!w.gust) return w.speed;
+          return w.speed * (1 + 0.25 * Math.sin(simTime * 0.23) + 0.15 * Math.sin(simTime * 0.71));
+        }
 
-          wakeCounter = wakeCounter + 1;
-          if(wakeCounter >= wakeThreshold){
+        /* ================= physics ================= */
+        function stepShip() {
+          /* controls -> actuators */
+          if (wPressed || upPressed) ship.throttle = Math.min(1, ship.throttle + THROTTLE_RATE * DT);
+          if (sPressed || downPressed) ship.throttle = Math.max(-1, ship.throttle - THROTTLE_RATE * DT);
+          if (aPressed || leftPressed) ship.azimuth = Math.min(AZIMUTH_MAX, ship.azimuth + AZIMUTH_RATE * DT);
+          if (dPressed || rightPressed) ship.azimuth = Math.max(-AZIMUTH_MAX, ship.azimuth - AZIMUTH_RATE * DT);
+          ship.bowThr = (bowStbd ? 1 : 0) - (bowPort ? 1 : 0);
+          ship.sternThr = (sternStbd ? 1 : 0) - (sternPort ? 1 : 0);
+
+          /* body-frame forces (kN) and yaw moment (kN*m)
+             azimuth > 0 deflects thrust to starboard: the stern kicks starboard
+             and the bow swings to port (A = port turn, like a rudder). */
+          var T = ship.throttle >= 0 ? ship.throttle * THRUST_AHEAD : ship.throttle * THRUST_ASTERN;
+          var fBow = ship.bowThr * THRUSTER_F;
+          var fStern = ship.sternThr * THRUSTER_F;
+          var Fu = T * Math.cos(ship.azimuth);
+          var Fv = T * Math.sin(ship.azimuth) + fBow + fStern;
+          var N = -STERN_ARM * T * Math.sin(ship.azimuth) + BOW_ARM * fBow - STERN_ARM * fStern;
+
+          /* water flowing over the deflected pods acts like a rudder, so the
+             helm still bites while coasting at zero throttle (reverses astern) */
+          var podFlow = POD_FLOW_K * ship.u * Math.abs(ship.u) * Math.sin(ship.azimuth);
+          Fv += podFlow;
+          N -= STERN_ARM * podFlow;
+
+          /* wind: force toward (from + 180), projected into the body frame */
+          var ws = windSpeedNow();
+          var d = (level.wind.from + 180) * Math.PI / 180;
+          var Fw = WIND_K * ws * ws;
+          Fu += Fw * Math.cos(d - ship.heading);
+          Fv += Fw * Math.sin(d - ship.heading);
+
+          /* drag */
+          Fu -= DRAG_U1 * ship.u + DRAG_U2 * ship.u * Math.abs(ship.u);
+          Fv -= DRAG_V1 * ship.v + DRAG_V2 * ship.v * Math.abs(ship.v);
+          N -= DRAG_R1 * ship.r + DRAG_R2 * ship.r * Math.abs(ship.r);
+
+          /* semi-implicit Euler; current advects the ship in the world frame */
+          ship.u += Fu / MASS * DT;
+          ship.v += Fv / MASS * DT;
+          ship.r += N / IZZ * DT;
+          ship.heading += ship.r * DT;
+          var vel = groundVelocity();
+          ship.x += vel[0] * DT;
+          ship.y += vel[1] * DT;
+          simTime += DT;
+
+          /* wake trail */
+          wakeCounter++;
+          if (wakeCounter >= WAKE_EVERY) {
             wakeCounter = 0;
-            for(var i = 0; i < (wakeLength-1); i++){
-              wake[i] = wake[i+1];
+            wake.push(localToWorld(0, -80));
+            if (wake.length > WAKE_LENGTH) wake.shift();
+          }
+        }
+
+        /* ================= collision ================= */
+        function checkCollision() {
+          var hull = shipHullWorld();
+          var hb = bboxOf(hull);
+          for (var p = 0; p < collidables.length; p++) {
+            var poly = collidables[p];
+            if (!bboxOverlap(hb, poly.bbox)) continue;
+            var pts = poly.pts;
+            for (var i = 0; i < hull.length; i++) {
+              var h1 = hull[i], h2 = hull[(i + 1) % hull.length];
+              for (var j = 0; j < pts.length; j++) {
+                if (segSeg(h1, h2, pts[j], pts[(j + 1) % pts.length])) return true;
+              }
             }
-            
-            wake[wakeLength-1] = [sternX, sternY];
+            if (robustPointInPolygon(pts, [ship.x, ship.y]) <= 0) return true; // ship swallowed
+            if (robustPointInPolygon(hull, pts[0]) <= 0) return true;          // small poly inside hull
+          }
+          return false;
+        }
+
+        /* ================= berth logic ================= */
+        function checkBerth() {
+          var b = level.berth;
+          var bh = b.hdg * Math.PI / 180;
+          var dx = ship.x - b.cx, dy = ship.y - b.cy;
+          var along = dx * Math.sin(bh) - dy * Math.cos(bh);
+          var across = dx * Math.cos(bh) + dy * Math.sin(bh);
+          var ad = Math.abs(angDiffDeg(ship.heading * 180 / Math.PI, b.hdg));
+          var aligned = ad < HEADING_TOL || ad > 180 - HEADING_TOL;
+          var vel = groundVelocity();
+          var sog = Math.hypot(vel[0], vel[1]);
+          var alongTol = (b.len - SHIP_LEN) / 2 + 15;
+          berthConditionsMet = Math.abs(along) < alongTol && Math.abs(across) < b.wid / 2 &&
+            aligned && sog < BERTH_MAX_SPEED && Math.abs(ship.r) < BERTH_MAX_YAWRATE;
+          if (berthConditionsMet) {
+            holdTimer += DT;
+            if (holdTimer >= HOLD_TIME) gameState = "berthed";
           } else {
-            wakeCounter = wakeCounter + 1;
+            holdTimer = 0;
           }
         }
 
-
-
-        function distance(x1, y1, x2, y2){
-          return Math.sqrt((x1-x2)**2+(y1-y2)**2);
+        /* ================= wind particles (world space) ================= */
+        function viewBounds(margin) {
+          var hw = canvas.width / 2 / PXPM + margin;
+          var hh = canvas.height / 2 / PXPM + margin;
+          return { minx: camX - hw, miny: camY - hh, maxx: camX + hw, maxy: camY + hh };
         }
 
-        function drawHobartCity(){
-          ctx.fillStyle = "#C3F1D5";
-          ctx.beginPath();
-          ctx.moveTo(hobartCity[0][0],hobartCity[0][1]);
-          for(var index = 1; index < hobartCity.length; index++){
-            ctx.lineTo(hobartCity[index][0], hobartCity[index][1]);
+        function scatterWindParticles() {
+          var vb = viewBounds(20);
+          for (var i = 0; i < windParticles.length; i++) {
+            windParticles[i] = [vb.minx + Math.random() * (vb.maxx - vb.minx),
+                                vb.miny + Math.random() * (vb.maxy - vb.miny)];
           }
-          ctx.closePath();
-          ctx.fill();
         }
 
-        function drawThrottle(){
-          var throttleX = 50;
-          var throttleY = canvas.height-50;
-          var throttleRadius = 30;
-          var stuckRadius = 50;
-          var stickKnobRadius = 5;
-          ctx.beginPath();
-          ctx.arc(throttleX, throttleY, throttleRadius, 0, Math.PI);
-          ctx.closePath();
-          ctx.fillStyle() = ""
-          ctx.fill();
-        }
-
-        function drawRosny(){
-          ctx.fillStyle = "#C3F1D5";
-          ctx.beginPath();
-          ctx.moveTo(rosny[0][1], rosny[0][1]);
-          for(var index = 1; index < rosny.length; index++){
-            ctx.lineTo(rosny[index][0], rosny[index][1]);
+        function scatterCurrentParticles() {
+          var vb = viewBounds(20);
+          for (var i = 0; i < currentParticles.length; i++) {
+            currentParticles[i][0] = vb.minx + Math.random() * (vb.maxx - vb.minx);
+            currentParticles[i][1] = vb.miny + Math.random() * (vb.maxy - vb.miny);
           }
-          ctx.closePath();
-          ctx.fill();
         }
 
-        function drawTitleScreen(){
-          ctx.rect(0,0,canvas.width,canvas.height);
-          ctx.fillStyle = "#F95903";
-          ctx.fill();
-
-          ctx.font = "70px Impact";
-          ctx.fillStyle = "#FFFFFF";
-          var textString = "Parking Mania: Nuyina";
-          var textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width/2-textWidth/2, 200);
-
-          var textY = 300;
-          var lineSpacing = 30;
-          ctx.font = "24px Impact";
-          ctx.fillStyle = "#FFFFFF";
-          textString = "Park the ship.";
-          textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
-          textY = textY + lineSpacing;
-
-          ctx.font = "24px Impact";
-          ctx.fillStyle = "#FFFFFF";
-          textString = "Left and Right Arrows to steer the rudder.";
-          textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
-          textY = textY + lineSpacing;
-
-          ctx.font = "24px Impact";
-          ctx.fillStyle = "#FFFFFF";
-          textString = "A and D to use the thrusters.";
-          textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
-          textY = textY + lineSpacing;
-
-          ctx.font = "24px Impact";
-          ctx.fillStyle = "#FFFFFF";
-          textString = "Up and Down for Throttle Control.";
-          textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
-          textY = textY + 100;
-
-          ctx.font = "24px Impact";
-          ctx.fillStyle = "#FFFFFF";
-          textString = "HIT SPACE TO START";
-          textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width/2-textWidth/2, textY);
-          textY = textY + lineSpacing;
-
-          ctx.font = "8px Arial";
-          ctx.fillStyle = "#FFFFFF";
-          textString = "Will Rigby, Polar Tech Design Team";
-          textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width-3-textWidth, canvas.height-3);
-          textY = textY + lineSpacing;
-
-
+        function advectCurrentParticles() {
+          var cs = level.current.speed;
+          if (cs <= 0) return;
+          var cd = level.current.to * Math.PI / 180;
+          var vx = Math.sin(cd) * cs * CURRENT_VIS_SCALE, vy = -Math.cos(cd) * cs * CURRENT_VIS_SCALE;
+          var vb = viewBounds(20);
+          var w = vb.maxx - vb.minx, h = vb.maxy - vb.miny;
+          for (var i = 0; i < currentParticles.length; i++) {
+            var p = currentParticles[i];
+            p[0] = vb.minx + ((p[0] + vx * DT - vb.minx) % w + w) % w;
+            p[1] = vb.miny + ((p[1] + vy * DT - vb.miny) % h + h) % h;
+          }
         }
 
-        function drawShip(){
-          
+        function advectWindParticles() {
+          var ws = windSpeedNow();
+          var d = (level.wind.from + 180) * Math.PI / 180;
+          var vx = Math.sin(d) * ws * 2.5, vy = -Math.cos(d) * ws * 2.5;
+          var vb = viewBounds(20);
+          var w = vb.maxx - vb.minx, h = vb.maxy - vb.miny;
+          for (var i = 0; i < windParticles.length; i++) {
+            var p = windParticles[i];
+            p[0] += vx * DT;
+            p[1] += vy * DT;
+            /* wrap within the visible rect so density stays even as the camera moves */
+            p[0] = vb.minx + ((p[0] - vb.minx) % w + w) % w;
+            p[1] = vb.miny + ((p[1] - vb.miny) % h + h) % h;
+          }
+        }
+
+        /* ================= world rendering ================= */
+        function applyCamera() {
+          ctx.save();
+          ctx.translate(canvas.width / 2, canvas.height / 2);
+          ctx.scale(PXPM, PXPM);
+          ctx.translate(-camX, -camY);
+        }
+
+        function drawPolyPath(pts) {
           ctx.beginPath();
-          ctx.translate(shipX, shipY);
-          ctx.rotate(-shipHeading);
-          ctx.moveTo(0,0);
-          ctx.lineTo(4,-4);
-          ctx.lineTo(4,-14);
-          ctx.lineTo(6,-14);
-          ctx.lineTo(6,-16);
-          ctx.lineTo(4,-18);
-          ctx.lineTo(4,-shipLength);
-          ctx.lineTo(-4,-shipLength);
-          ctx.lineTo(-4,-18);
-          ctx.lineTo(-6,-16);
-          ctx.lineTo(-6,-14);
-          ctx.lineTo(-4,-14);
-          ctx.lineTo(-4,-4);
+          ctx.moveTo(pts[0][0], pts[0][1]);
+          for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
           ctx.closePath();
-          ctx.fillStyle = "#FF0000";
-          ctx.fill();
-          
-          
-          ctx.rotate(shipHeading)
-          ctx.translate(-shipX, -shipY)
         }
 
-        function drawWake(){
-          wakeWidth = 4;
-          widthDecrement = wakeWidth/wakeLength;
-          for(var i = wakeLength-1; i >= 0; i--){
-            ctx.beginPath();
-            ctx.arc(wake[i][0], wake[i][1], wakeWidth, 0, Math.PI*2);
-            ctx.closePath();
-            ctx.fillStyle = "#81E1FF";
+        function drawPolyList(list, vb, fill, stroke) {
+          ctx.fillStyle = fill;
+          if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1 / PXPM; }
+          for (var i = 0; i < list.length; i++) {
+            var b = list[i].bbox;
+            if (b[2] < vb.minx || b[0] > vb.maxx || b[3] < vb.miny || b[1] > vb.maxy) continue;
+            drawPolyPath(list[i].pts);
             ctx.fill();
-            wakeWidth = wakeWidth-widthDecrement;
+            if (stroke) ctx.stroke();
           }
         }
 
-        function drawNet(){
-          ctx.moveTo(sternX, sternY);
-          ctx.lineTo(netX, netY);
-          ctx.strokeStyle = "#000000";
-
-          ctx.stroke();
-
-          ctx.translate(netX, netY);
-          ctx.rotate(-netHeading);
-          ctx.beginPath();
-          ctx.moveTo(-2,0);
-          ctx.lineTo(2,0);
-          ctx.lineTo(0,5);
-          
-          ctx.closePath();
-          ctx.fillStyle = "#000000";
-          ctx.fill();
-          
-          ctx.rotate(netHeading)
-          ctx.translate(-netX, -netY)
-        }
-
-
-
-        
-
-        function drawScore(){
-          ctx.font = "16px Courier New";
-          ctx.fillStyle = "#0095DD";
-          ctx.fillText("Score: "+score, 8, 20);
-        }
-
-        function drawExitedPermitZone(){
-          ctx.font = "32px Impact";
-          
-          ctx.fillStyle = "#FFFFFF";
-
-          var textString = "You left the permit zone!";
-          textWidth = ctx.measureText(textString ).width;
-
-          ctx.fillText(textString, canvas.width/2-textWidth/2, 200);
-        }
-
-        function drawWind(){
-          for(var i = 0; i < windParticleCount; i++){
+        /* faint drifting streaks that make the tidal stream visible; drawn on
+           the open water before the land goes on top */
+        function drawCurrentLayer() {
+          var cs = level.current.speed;
+          if (cs <= 0) return;
+          var cd = level.current.to * Math.PI / 180;
+          var lx = Math.sin(cd) * (8 + cs * 14), ly = -Math.cos(cd) * (8 + cs * 14);
+          ctx.strokeStyle = "#66B8FF";
+          ctx.lineWidth = 1.6;
+          ctx.lineCap = "round";
+          for (var i = 0; i < currentParticles.length; i++) {
+            var p = currentParticles[i];
+            ctx.globalAlpha = 0.10 + 0.12 * (0.5 + 0.5 * Math.sin(simTime * 0.8 + p[2]));
             ctx.beginPath();
-            ctx.moveTo(windParticles[i][0], windParticles[i][1]);
-            x1 = windParticles[i][0]-30*windSpeed*Math.cos(windHeading/180*Math.PI+Math.PI/2);
-            y1 = windParticles[i][1]-30*windSpeed*Math.sin(windHeading/180*Math.PI+Math.PI/2);
-            ctx.lineTo(x1,y1);
-            ctx.closePath();
-            ctx.strokeStyle = "#FFFFFF";
+            ctx.moveTo(p[0] - lx, p[1] - ly);
+            ctx.lineTo(p[0], p[1]);
+            ctx.stroke();
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        function drawRoads(vb) {
+          var roads = HOBART_TERRAIN.roads || [];
+          ctx.strokeStyle = "#B9C6BD";
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          for (var i = 0; i < roads.length; i++) {
+            var r = roads[i], b = r.bbox;
+            if (b[2] < vb.minx || b[0] > vb.maxx || b[3] < vb.miny || b[1] > vb.maxy) continue;
+            ctx.lineWidth = r.w;
+            ctx.beginPath();
+            ctx.moveTo(r.pts[0][0], r.pts[0][1]);
+            for (var j = 1; j < r.pts.length; j++) ctx.lineTo(r.pts[j][0], r.pts[j][1]);
             ctx.stroke();
           }
         }
 
-        function drawIceBergCollision(){
-          ctx.font = "32px Impact";
-          
-          ctx.fillStyle = "#FFFFFF";
-
-          var textString = "You hit an iceberg!";
-          textWidth = ctx.measureText(textString ).width;
-
-          ctx.fillText(textString, canvas.width/2-textWidth/2, 200);
+        function drawTerrain(vb) {
+          ctx.fillStyle = "#0042C2";
+          ctx.fillRect(vb.minx, vb.miny, vb.maxx - vb.minx, vb.maxy - vb.miny);
+          drawCurrentLayer();
+          drawPolyList(HOBART_TERRAIN.land, vb, "#C3F1D5");
+          drawPolyList(HOBART_TERRAIN.vegetation || [], vb, "#9BDFB4");
+          drawPolyList(HOBART_TERRAIN.water, vb, "#0042C2");
+          drawRoads(vb);
+          drawPolyList(HOBART_TERRAIN.buildings || [], vb, "#DCD3C4", "#B3A896");
+          drawPolyList(HOBART_TERRAIN.piers, vb, "#9FCEB2", "#6B9C80");
         }
 
-        function drawFinalScore(){
-          ctx.font = "24px Impact";
-          
-          ctx.fillStyle = "#FFFFFF";
-
-          var textString = "Score: "+score;
-          textWidth = ctx.measureText(textString ).width;
-
-          ctx.fillText(textString, canvas.width/2-textWidth/2, 350);
-
-          ctx.font = "24px Impact";
-          ctx.fillStyle = "#FFFFFF";
-          textString = "HIT SPACE TO RESTART";
-          textWidth = ctx.measureText(textString ).width;
-          ctx.fillText(textString, canvas.width/2-textWidth/2, 390);
+        function drawBerthZone() {
+          var b = level.berth;
+          ctx.save();
+          ctx.translate(b.cx, b.cy);
+          ctx.rotate(b.hdg * Math.PI / 180);
+          var pulse = berthConditionsMet ? 0.25 + 0.15 * Math.sin(simTime * 6) : 0.12;
+          ctx.fillStyle = "rgba(255,212,0," + pulse + ")";
+          ctx.fillRect(-b.wid / 2, -b.len / 2, b.wid, b.len);
+          ctx.strokeStyle = "#FFD400";
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([10, 6]);
+          ctx.strokeRect(-b.wid / 2, -b.len / 2, b.wid, b.len);
+          ctx.setLineDash([]);
+          ctx.restore();
         }
 
-        function calculateWind(){
-          for(var i = 0; i < windParticleCount; i++){
-            
-            windParticles[i][0] = windParticles[i][0]-5*windSpeed*Math.cos(windHeading/180*Math.PI+Math.PI/2);
-            windParticles[i][1] = windParticles[i][1]-5*windSpeed*Math.sin(windHeading/180*Math.PI+Math.PI/2);
-            if(windParticles[i][0] < 0){
-              windParticles[i][0] = canvas.width;
-              windParticles[i][1] = Math.random()*canvas.height;
-            } else if(windParticles[i][0] > canvas.width){
-              windParticles[i][0] = 0;
-              windParticles[i][1] = Math.random()*canvas.height;
-            } else if(windParticles[i][1] < 0){
-              windParticles[i][0] = Math.random() * canvas.width;
-              windParticles[i][1] = canvas.height;
-            } else if(windParticles[i][1] > canvas.height){
-              windParticles[i][0] = Math.random()*canvas.height;
-              windParticles[i][1] = 0;
-            }
-            
-          }
+        function drawPylons(vb) {
+          drawPolyList(PYLONS, vb, "#3D3D3D", "#222222");
         }
 
-        function resetGame(){
-          
+        function drawBridgeDeck(vb) {
+          ctx.globalAlpha = 0.5;
+          drawPolyList(HOBART_TERRAIN.bridgeDeck, vb, "#6E6E6E", "#4A4A4A");
+          ctx.globalAlpha = 1;
         }
 
-        function gameLoop(){
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          if(started){
-            
-            ctx.rect(0, 0, canvas.width, canvas.height);
-            ctx.fillStyle = "#0042C2";
+        function drawWake() {
+          for (var i = 0; i < wake.length; i++) {
+            ctx.globalAlpha = 0.25 * (i + 1) / wake.length;
+            ctx.fillStyle = "#FFFFFF";
+            ctx.beginPath();
+            ctx.arc(wake[i][0], wake[i][1], 3, 0, Math.PI * 2);
             ctx.fill();
-            calculateShipMotion();
-            calculateWind();
-        
-            drawHobartCity();
-            drawRosny();
-            drawShip();
-            drawWind();
-              //document.location.reload();
-            
-            
-        } else {
-          drawTitleScreen();
+          }
+          ctx.globalAlpha = 1;
         }
-      }
 
+        function drawShip() {
+          ctx.save();
+          ctx.translate(ship.x, ship.y);
+          ctx.rotate(ship.heading);
+
+          /* prop wash showing azimuth direction */
+          if (Math.abs(ship.throttle) > 0.05) {
+            ctx.strokeStyle = "rgba(255,255,255,0.6)";
+            ctx.lineWidth = 2;
+            var washDir = ship.throttle > 0 ? 1 : -1; // wash goes aft when ahead
+            var wl = 14 * Math.abs(ship.throttle);
+            for (var i = -1; i <= 1; i++) {
+              ctx.beginPath();
+              ctx.moveTo(i * 4, 80);
+              ctx.lineTo(i * 4 + Math.sin(ship.azimuth) * wl * washDir * -1,
+                         80 + Math.cos(ship.azimuth) * wl * washDir);
+              ctx.stroke();
+            }
+          }
+
+          /* hull (drawn with y' forward = up = -y in canvas terms) */
+          ctx.beginPath();
+          ctx.moveTo(SHIP_HULL[0][0], -SHIP_HULL[0][1]);
+          for (var i = 1; i < SHIP_HULL.length; i++) {
+            ctx.lineTo(SHIP_HULL[i][0], -SHIP_HULL[i][1]);
+          }
+          ctx.closePath();
+          ctx.fillStyle = "#C93222";
+          ctx.fill();
+          ctx.strokeStyle = "#7A1F12";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          /* Deck plan follows the Nuyina from above, bow to stern: orange flared
+             bow, green winch-only foredeck, white bridge with full-width wings,
+             green cargo deck with hatches and cranes, white aft house flanked by
+             lifeboats, helideck right aft. */
+
+          /* main deck (Nuyina green), inset from the red hull rim */
+          ctx.beginPath();
+          ctx.moveTo(0, -74);
+          ctx.lineTo(8.6, -59); ctx.lineTo(11, -42); ctx.lineTo(11, 64); ctx.lineTo(6.5, 77);
+          ctx.lineTo(-6.5, 77); ctx.lineTo(-11, 64); ctx.lineTo(-11, -42); ctx.lineTo(-8.6, -59);
+          ctx.closePath();
+          ctx.fillStyle = "#37A065";
+          ctx.fill();
+
+          /* flared orange bow */
+          ctx.beginPath();
+          ctx.moveTo(0, -80);
+          ctx.lineTo(10, -62); ctx.lineTo(11.8, -52); ctx.lineTo(-11.8, -52); ctx.lineTo(-10, -62);
+          ctx.closePath();
+          ctx.fillStyle = "#F26A2E";
+          ctx.fill();
+
+          /* foredeck: helicopters winch here, never land - yellow hoist circle */
+          ctx.fillStyle = "#F5C542";
+          ctx.beginPath();
+          ctx.arc(0, -40, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = "rgba(255,255,255,0.9)";
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.arc(0, -40, 6.5, 0, Math.PI * 2);
+          ctx.stroke();
+
+          /* bridge block with wings out to the rails */
+          ctx.fillStyle = "#F0F1EE";
+          ctx.fillRect(-9.5, -28, 19, 22);
+          ctx.fillStyle = "#E0E2DD";
+          ctx.fillRect(-12.6, -26, 25.2, 5);
+          ctx.fillStyle = "#C9CCC6";
+          ctx.fillRect(-4, -12, 8, 5);           // exhaust casing aft of the bridge
+
+          /* cargo deck: hatch covers + white cranes to starboard */
+          ctx.fillStyle = "#2C7F50";
+          ctx.fillRect(-8, -2, 16, 12);
+          ctx.fillRect(-8, 14, 16, 12);
+          ctx.strokeStyle = "#F4F4F4";
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          ctx.moveTo(7.5, 4); ctx.lineTo(-4, -4);
+          ctx.moveTo(7.5, 26); ctx.lineTo(-4, 18);
+          ctx.stroke();
+          ctx.fillStyle = "#F4F4F4";
+          ctx.beginPath();
+          ctx.arc(7.5, 4, 2.6, 0, Math.PI * 2);
+          ctx.arc(7.5, 26, 2.6, 0, Math.PI * 2);
+          ctx.fill();
+
+          /* aft deckhouse with orange lifeboats along both sides */
+          ctx.fillStyle = "#F0F1EE";
+          ctx.fillRect(-9.5, 34, 19, 18);
+          ctx.fillStyle = "#F07C1E";
+          ctx.fillRect(-12.4, 36, 3, 5); ctx.fillRect(-12.4, 43, 3, 5);
+          ctx.fillRect(9.4, 36, 3, 5); ctx.fillRect(9.4, 43, 3, 5);
+
+          /* helideck aft: green disc, white ring and H */
+          ctx.fillStyle = "#43B573";
+          ctx.beginPath();
+          ctx.arc(0, 64, 10.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = "#F4F4F4";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          ctx.fillStyle = "#F4F4F4";
+          ctx.fillRect(-3.2, 60, 1.8, 8);
+          ctx.fillRect(1.4, 60, 1.8, 8);
+          ctx.fillRect(-1.4, 63.2, 2.8, 1.6);
+
+          ctx.restore();
+        }
+
+        function drawWindParticles() {
+          var ws = windSpeedNow();
+          var d = (level.wind.from + 180) * Math.PI / 180;
+          var lx = Math.sin(d) * (2 + ws * 0.8), ly = -Math.cos(d) * (2 + ws * 0.8);
+          ctx.strokeStyle = "#FFFFFF";
+          ctx.globalAlpha = 0.35;
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          for (var i = 0; i < windParticles.length; i++) {
+            var p = windParticles[i];
+            ctx.moveTo(p[0] - lx, p[1] - ly);
+            ctx.lineTo(p[0], p[1]);
+          }
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+
+        /* ---- C-key navigation debug: trajectory + orientation ---- */
+        function dbgArrow(x1, y1, x2, y2, color) {
+          var dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy);
+          if (len < 8) return;
+          var ux = dx / len, uy = dy / len;
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x2, y2);
+          ctx.lineTo(x2 - ux * 12 - uy * 6, y2 - uy * 12 + ux * 6);
+          ctx.lineTo(x2 - ux * 12 + uy * 6, y2 - uy * 12 - ux * 6);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        function drawDebugWorld() {
+          /* predicted track: coast 120 s ahead on frozen u/v/r plus the current */
+          var cd = level.current.to * Math.PI / 180, cs = level.current.speed;
+          var px = ship.x, py = ship.y, ph = ship.heading, step = 2;
+          ctx.fillStyle = "#FFD400";
+          for (var t = step; t <= 120; t += step) {
+            ph += ship.r * step;
+            px += (ship.u * Math.sin(ph) + ship.v * Math.cos(ph) + cs * Math.sin(cd)) * step;
+            py += (-ship.u * Math.cos(ph) + ship.v * Math.sin(ph) - cs * Math.cos(cd)) * step;
+            ctx.globalAlpha = 1 - t / 150;
+            ctx.beginPath();
+            ctx.arc(px, py, t % 20 === 0 ? 2.6 : 1.2, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+
+          /* orientation: cyan = heading, magenta = course over ground */
+          dbgArrow(ship.x, ship.y,
+                   ship.x + Math.sin(ship.heading) * 220,
+                   ship.y - Math.cos(ship.heading) * 220, "#00E5FF");
+          var vel = groundVelocity();
+          dbgArrow(ship.x, ship.y, ship.x + vel[0] * 45, ship.y + vel[1] * 45, "#FF5FD2");
+        }
+
+        function drawDebugHUD() {
+          var vel = groundVelocity();
+          var sog = Math.hypot(vel[0], vel[1]);
+          var cog = (Math.atan2(vel[0], -vel[1]) * 180 / Math.PI + 360) % 360;
+          var hdg = ((ship.heading * 180 / Math.PI) % 360 + 360) % 360;
+          var lines = [
+            "HDG " + hdg.toFixed(1) + "°  ROT " + (ship.r * 180 / Math.PI * 60).toFixed(1) + "°/min",
+            "COG " + (sog > 0.02 ? cog.toFixed(1) + "°" : "---") + "  SOG " + (sog * 1.944).toFixed(2) + " kn",
+            "surge " + ship.u.toFixed(2) + "  sway " + ship.v.toFixed(2) + " m/s",
+            "throttle " + Math.round(ship.throttle * 100) + "%  azimuth " + (-ship.azimuth * 180 / Math.PI).toFixed(0) + "°",
+            "pos " + ship.x.toFixed(0) + ", " + ship.y.toFixed(0),
+            "cyan HDG / pink COG / gold 120s track",
+          ];
+          ctx.fillStyle = "rgba(0,0,0,0.55)";
+          ctx.fillRect(12, 46, 244, lines.length * 16 + 10);
+          ctx.font = "12px Consolas, monospace";
+          ctx.fillStyle = "#7FFFEE";
+          for (var i = 0; i < lines.length; i++) ctx.fillText(lines[i], 20, 62 + i * 16);
+        }
+
+        function renderWorld() {
+          camX = ship.x;
+          camY = ship.y;
+          applyCamera();
+          var vb = viewBounds(100);
+          drawTerrain(vb);
+          drawBerthZone();
+          drawPylons(vb);
+          drawWake();
+          drawShip();
+          if (debugOverlay) drawDebugWorld();
+          drawWindParticles();
+          drawBridgeDeck(vb); /* after the ship: she passes underneath */
+          ctx.restore();
+        }
+
+        /* ================= HUD ================= */
+        function drawArrow(x, y, angleRad, len, color) {
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(angleRad);
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(0, len / 2);
+          ctx.lineTo(0, -len / 2 + 6);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(0, -len / 2);
+          ctx.lineTo(-5, -len / 2 + 9);
+          ctx.lineTo(5, -len / 2 + 9);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+
+        function drawHUD() {
+          /* --- throttle bar, bottom-left --- */
+          var tx = 24, ty = canvas.height - 170, th = 120, tw = 18;
+          ctx.fillStyle = "rgba(0,0,0,0.45)";
+          ctx.fillRect(tx - 6, ty - 22, 118, th + 44);
+          ctx.strokeStyle = "#FFFFFF";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(tx, ty, tw, th);
+          var mid = ty + th / 2;
+          if (ship.throttle >= 0) {
+            ctx.fillStyle = "#3ECF5A";
+            ctx.fillRect(tx, mid - ship.throttle * th / 2, tw, ship.throttle * th / 2);
+          } else {
+            ctx.fillStyle = "#E04B3A";
+            ctx.fillRect(tx, mid, tw, -ship.throttle * th / 2);
+          }
+          ctx.strokeStyle = "#FFFFFF";
+          ctx.beginPath();
+          ctx.moveTo(tx - 3, mid);
+          ctx.lineTo(tx + tw + 3, mid);
+          ctx.stroke();
+          ctx.font = "12px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText("THROTTLE", tx - 4, ty - 8);
+
+          /* --- steering dial (azimuth) --- */
+          var sx = tx + 70, sy = ty + 34;
+          ctx.strokeStyle = "#FFFFFF";
+          ctx.beginPath();
+          ctx.arc(sx, sy, 26, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(sx, sy - 26);
+          ctx.lineTo(sx, sy - 20);
+          ctx.stroke();
+          /* arrow leans the way you steer: A (port turn) -> left */
+          drawArrow(sx, sy, -ship.azimuth, 40, "#FFD400");
+          ctx.font = "12px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText("STEER", sx - 15, sy + 44);
+
+          /* --- thruster indicators --- */
+          var bx = sx, byy = ty + 96;
+          ctx.font = "12px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText("BOW", bx - 44, byy + 4);
+          ctx.fillText("STERN", bx - 44, byy + 22);
+          function thrLight(cx, cy, dir, active) {
+            ctx.fillStyle = active ? "#FFD400" : "rgba(255,255,255,0.25)";
+            ctx.beginPath();
+            if (dir < 0) { ctx.moveTo(cx - 8, cy); ctx.lineTo(cx, cy - 5); ctx.lineTo(cx, cy + 5); }
+            else { ctx.moveTo(cx + 8, cy); ctx.lineTo(cx, cy - 5); ctx.lineTo(cx, cy + 5); }
+            ctx.closePath();
+            ctx.fill();
+          }
+          thrLight(bx - 6, byy, -1, ship.bowThr < 0);
+          thrLight(bx + 10, byy, 1, ship.bowThr > 0);
+          thrLight(bx - 6, byy + 18, -1, ship.sternThr < 0);
+          thrLight(bx + 10, byy + 18, 1, ship.sternThr > 0);
+
+          /* --- level name, top-left --- */
+          ctx.fillStyle = "rgba(0,0,0,0.45)";
+          ctx.fillRect(12, 12, 330, 28);
+          ctx.font = "18px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText(level.name, 20, 32);
+
+          /* --- wind + current, top-right --- */
+          var wx = canvas.width - 120;
+          ctx.fillStyle = "rgba(0,0,0,0.45)";
+          ctx.fillRect(wx - 12, 12, 120, 118);
+          var ws = windSpeedNow();
+          var windTo = (level.wind.from + 180) * Math.PI / 180;
+          drawArrow(wx + 20, 44, windTo, 34, "#FFFFFF"); /* arrow tip points where the wind blows */
+          ctx.font = "14px Impact";
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText("WIND", wx + 46, 34);
+          ctx.fillText((ws * 1.944).toFixed(0) + " kn", wx + 46, 52);
+          var cs = level.current.speed;
+          var curTo = level.current.to * Math.PI / 180;
+          drawArrow(wx + 20, 98, curTo, 34, cs > 0 ? "#7FD4FF" : "rgba(255,255,255,0.25)");
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText("CURRENT", wx + 46, 88);
+          ctx.fillText(cs > 0 ? (cs * 1.944).toFixed(1) + " kn" : "slack", wx + 46, 106);
+
+          /* --- speed + heading, bottom-center --- */
+          var vel = groundVelocity();
+          var sog = Math.hypot(vel[0], vel[1]);
+          var hdg = ((ship.heading * 180 / Math.PI) % 360 + 360) % 360;
+          ctx.fillStyle = "rgba(0,0,0,0.45)";
+          ctx.fillRect(canvas.width / 2 - 110, canvas.height - 40, 220, 28);
+          ctx.font = "16px Impact";
+          ctx.fillStyle = sog < BERTH_MAX_SPEED ? "#3ECF5A" : "#FFFFFF";
+          ctx.fillText("SOG " + (sog * 1.944).toFixed(1) + " kn", canvas.width / 2 - 96, canvas.height - 20);
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText("HDG " + hdg.toFixed(0).padStart(3, "0") + "°", canvas.width / 2 + 26, canvas.height - 20);
+
+          /* --- hold countdown --- */
+          if (holdTimer > 0 && gameState == "playing") {
+            var frac = holdTimer / HOLD_TIME;
+            ctx.fillStyle = "rgba(0,0,0,0.45)";
+            ctx.fillRect(canvas.width / 2 - 90, 52, 180, 34);
+            ctx.fillStyle = "#FFD400";
+            ctx.fillRect(canvas.width / 2 - 82, 74, 164 * frac, 6);
+            ctx.font = "16px Impact";
+            ctx.fillStyle = "#FFFFFF";
+            var txt = "HOLD " + (HOLD_TIME - holdTimer).toFixed(1);
+            ctx.fillText(txt, canvas.width / 2 - ctx.measureText(txt).width / 2, 68);
+          }
+
+          drawBerthPointer();
+        }
+
+        /* Yellow chevron on the screen edge pointing to an off-screen berth. */
+        function drawBerthPointer() {
+          var b = level.berth;
+          var sx = (b.cx - camX) * PXPM + canvas.width / 2;
+          var sy = (b.cy - camY) * PXPM + canvas.height / 2;
+          var m = 26;
+          if (sx > m && sx < canvas.width - m && sy > m && sy < canvas.height - m) return;
+          var cx = canvas.width / 2, cy = canvas.height / 2;
+          var dx = sx - cx, dy = sy - cy;
+          var scale = Math.min((cx - m) / Math.abs(dx || 1e-9), (cy - m) / Math.abs(dy || 1e-9));
+          var ex = cx + dx * scale, ey = cy + dy * scale;
+          ctx.save();
+          ctx.translate(ex, ey);
+          ctx.rotate(Math.atan2(dy, dx));
+          ctx.fillStyle = "#FFD400";
+          ctx.beginPath();
+          ctx.moveTo(12, 0);
+          ctx.lineTo(-6, -9);
+          ctx.lineTo(-6, 9);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+
+        /* ================= screens ================= */
+        function drawCenteredText(textString, y, font) {
+          ctx.font = font;
+          var textWidth = ctx.measureText(textString).width;
+          ctx.fillText(textString, canvas.width / 2 - textWidth / 2, y);
+        }
+
+        function drawCredit() {
+          ctx.font = "8px Arial";
+          ctx.fillStyle = "#FFFFFF";
+          var textString = "Will Rigby, Polar Tech Design Team";
+          var textWidth = ctx.measureText(textString).width;
+          ctx.fillText(textString, canvas.width - 3 - textWidth, canvas.height - 3);
+        }
+
+        function drawTitleScreen() {
+          ctx.fillStyle = "#F95903";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          ctx.fillStyle = "#FFFFFF";
+          drawCenteredText("Parking Mania: Nuyina", 150, "70px Impact");
+          drawCenteredText("Berth the icebreaker RSV Nuyina in the Port of Hobart.", 200, "22px Impact");
+
+          var textY = 270;
+          var lineSpacing = 32;
+          drawCenteredText("W / S - throttle ahead and astern", textY, "24px Impact"); textY += lineSpacing;
+          drawCenteredText("A / D - steer (rotate the azimuth thrusters)", textY, "24px Impact"); textY += lineSpacing;
+          drawCenteredText("I / O - bow thruster to port / starboard (Numpad 7 / 9)", textY, "24px Impact"); textY += lineSpacing;
+          drawCenteredText("K / L - stern thruster to port / starboard (Numpad 1 / 3)", textY, "24px Impact"); textY += lineSpacing;
+          drawCenteredText("Space / X - all stop     R - retry     C - nav debug", textY, "24px Impact"); textY += lineSpacing;
+          drawCenteredText("Hold her inside the yellow berth, aligned and dead slow, for 3 seconds.", textY, "20px Impact");
+
+          drawCenteredText("HIT SPACE TO START", 560, "28px Impact");
+          ctx.font = "12px Arial";
+          ctx.fillStyle = "#FFE0CC";
+          ctx.fillText("1-6: jump to a level", 10, canvas.height - 8);
+          drawCredit();
+        }
+
+        function wrapLines(text, font, maxWidth) {
+          ctx.font = font;
+          var words = text.split(" ");
+          var lines = [], line = "";
+          for (var i = 0; i < words.length; i++) {
+            var test = line ? line + " " + words[i] : words[i];
+            if (ctx.measureText(test).width > maxWidth && line) {
+              lines.push(line);
+              line = words[i];
+            } else {
+              line = test;
+            }
+          }
+          if (line) lines.push(line);
+          return lines;
+        }
+
+        function drawPanel(height) {
+          ctx.fillStyle = "rgba(0,0,0,0.55)";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = "#F95903";
+          ctx.fillRect(80, canvas.height / 2 - height / 2, canvas.width - 160, height);
+        }
+
+        function drawIntroPanel() {
+          drawPanel(300);
+          var y = canvas.height / 2 - 96;
+          ctx.fillStyle = "#FFFFFF";
+          drawCenteredText(level.name, y, "40px Impact");
+          y += 44;
+          var lines = wrapLines(level.brief, "20px Impact", canvas.width - 240);
+          for (var i = 0; i < lines.length; i++) {
+            drawCenteredText(lines[i], y, "20px Impact");
+            y += 26;
+          }
+          y += 14;
+          var w = level.wind, c = level.current;
+          drawCenteredText("Wind: " + (w.speed * 1.944).toFixed(0) + " kn from the " + compassName(w.from) +
+            (w.gust ? ", gusting" : "") + "    Current: " +
+            (c.speed > 0 ? (c.speed * 1.944).toFixed(1) + " kn setting " + compassName(c.to) : "slack"),
+            y, "20px Impact");
+          drawCenteredText("HIT SPACE TO BEGIN", canvas.height / 2 + 116, "26px Impact");
+          drawCredit();
+        }
+
+        function drawCrashPanel() {
+          drawPanel(200);
+          ctx.fillStyle = "#FFFFFF";
+          drawCenteredText("HARD CONTACT!", canvas.height / 2 - 40, "52px Impact");
+          drawCenteredText("You struck something, Captain. The harbourmaster is not impressed.", canvas.height / 2 + 8, "20px Impact");
+          drawCenteredText("HIT SPACE TO RETRY", canvas.height / 2 + 64, "26px Impact");
+          drawCredit();
+        }
+
+        function drawBerthedPanel() {
+          drawPanel(200);
+          ctx.fillStyle = "#FFFFFF";
+          drawCenteredText("ALL FAST!", canvas.height / 2 - 40, "52px Impact");
+          drawCenteredText("Nicely berthed. Lines ashore and gangway down.", canvas.height / 2 + 8, "20px Impact");
+          drawCenteredText(levelIndex + 1 < LEVELS.length ? "HIT SPACE FOR THE NEXT LEVEL" : "HIT SPACE",
+            canvas.height / 2 + 64, "26px Impact");
+          drawCredit();
+        }
+
+        function drawCompletePanel() {
+          drawPanel(240);
+          ctx.fillStyle = "#FFFFFF";
+          drawCenteredText("VOYAGE COMPLETE", canvas.height / 2 - 52, "52px Impact");
+          drawCenteredText("The Nuyina is fuelled, stored and ready for Antarctica.", canvas.height / 2 + 4, "22px Impact");
+          drawCenteredText("Well done, Captain.", canvas.height / 2 + 36, "22px Impact");
+          drawCenteredText("HIT SPACE FOR THE TITLE SCREEN", canvas.height / 2 + 88, "26px Impact");
+          drawCredit();
+        }
+
+        /* ================= level flow ================= */
+        function startLevel(i) {
+          levelIndex = i;
+          resetLevel();
+        }
+
+        function resetLevel() {
+          level = LEVELS[levelIndex];
+          ship.x = level.start.x;
+          ship.y = level.start.y;
+          ship.heading = level.start.hdg * Math.PI / 180;
+          ship.u = 0; ship.v = 0; ship.r = 0;
+          ship.throttle = 0; ship.azimuth = 0;
+          ship.bowThr = 0; ship.sternThr = 0;
+          simTime = 0;
+          holdTimer = 0;
+          berthConditionsMet = false;
+          wake = [];
+          wakeCounter = 0;
+          collidables = HOBART_TERRAIN.land.concat(HOBART_TERRAIN.piers, PYLONS);
+          camX = ship.x;
+          camY = ship.y;
+          scatterWindParticles();
+          scatterCurrentParticles();
+          gameState = "intro";
+        }
+
+        /* ================= main loop ================= */
+        function gameLoop() {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          if (gameState == "title") {
+            drawTitleScreen();
+            return;
+          }
+          if (gameState == "playing") {
+            stepShip();
+            if (checkCollision()) {
+              gameState = "crashed";
+            } else {
+              checkBerth();
+            }
+          }
+          advectWindParticles();
+          advectCurrentParticles();
+          renderWorld();
+          drawHUD();
+          if (debugOverlay) drawDebugHUD();
+          if (gameState == "intro") drawIntroPanel();
+          else if (gameState == "crashed") drawCrashPanel();
+          else if (gameState == "berthed") drawBerthedPanel();
+          else if (gameState == "complete") drawCompletePanel();
+        }
 
         setInterval(gameLoop, 20);
-        function generateHobartCity(){
-          return [
-            [0,0],
-            [241,0],
-            [260,33],
-            [276,42],
-            [281,42],
-            [284,35],
-            [290,33],
-            [303,32],
-            [335,32],
-            [334,36],
-            [339,41],
-            [351,51],
-            [359,62],
-            [362,71],
-            [356,83],
-            [346,110],
-            [344,157],
-            [339,161],
-            [324,177],
-            [319,193],
-            [321,202],
-            [330,214],
-            [326,229],
-            [329,243],
-            [331,263],
-            [340,272],
-            [348,272],
-            [350,274],
-            [345,285],
-            [364,298],
-            [388,325],
-            [389,329],
-            [397,340],
-            [409,337],
-            [423,327],
-            [428,330],
-            [428,337],
-            [424,337],
-            [429,375],
-            [421,376],
-            [433,452],
-            [366,463],
-            [329,445],
-            [332,440],
-            [313,428],
-            [300,440],
-            [316,454],
-            [325,447],
-            [329,450],
-            [322,456],
-            [323,459],
-            [307,475],
-            [301,470],
-            [309,461],
-            [294,448],
-            [283,458],
-            [303,475],
-            [298,483],
-            [323,500],
-            [320,506],
-            [293,491],
-            [281,509],
-            [272,507],
-            [270,513],
-            [279,516],
-            [280,518],
-            [288,520],
-            [288,522],
-            [280,522],
-            [281,531],
-            [316,532],
-            [376,537],
-            [386,545],
-            [396,549],
-            [395,581],
-            [393,583],
-            [385,586],
-            [381,596],
-            [382,604],
-            [379,607],
-            [381,614],
-            [389,621],
-            [394,629],
-            [394,640],
-            [0,640]
-        ];
-        }
 
-        function generateRosny(){
-          return [
-            [960,0],
-            [583,0],
-            [591,11],
-            [600,22],
-            [592,36],
-            [577,36],
-            [570,45],
-            [575,61],
-            [580,72],
-            [589,77],
-            [616,77],
-            [638,67],
-            [650,67],
-            [659,75],
-            [655,89],
-            [635,107],
-            [626,125],
-            [632,160],
-            [629,166],
-            [606,170],
-            [589,185],
-            [589,216],
-            [602,265],
-            [612,288],
-            [611,306],
-            [626,315],
-            [661,308],
-            [679,294],
-            [694,284],
-            [703,263],
-            [739,257],
-            [764,237],
-            [783,212],
-            [807,228],
-            [815,224],
-            [826,181],
-            [861,189],
-            [881,223],
-            [870,260],
-            [850,276],
-            [835,266],
-            [825,267],
-            [798,296],
-            [792,368],
-            [805,388],
-            [843,456],
-            [849,461],
-            [867,463],
-            [899,435],
-            [908,393],
-            [960,385],
-            [960,1]
-          ];
+        /* Diagnostics: open the page as parking-mania-nuyina.html#test to
+           auto-drive the ship for a few seconds and print a self-check result
+           into the page (also used by headless verification). */
+        if (location.hash == "#test") {
+          startLevel(0);
+          gameState = "playing";
+          wPressed = true;
+          var testStart = null;
+          setTimeout(function() { testStart = { x: ship.x, y: ship.y }; }, 500);
+          setTimeout(function() {
+            var moved = testStart ? distance(testStart.x, testStart.y, ship.x, ship.y) : -1;
+            var result = { moved: Math.round(moved * 100) / 100,
+                           u: Math.round(ship.u * 100) / 100 };
+            /* alongside Macquarie 2 in open water: no collision expected */
+            ship.heading = 351.6 * Math.PI / 180;
+            ship.u = 0; ship.v = 0; ship.r = 0;
+            ship.x = 3900; ship.y = 5170;
+            result.hitClear = checkCollision();
+            /* hull overlapping the quay face: edge intersection expected */
+            ship.x = 3785;
+            result.hitQuayEdge = checkCollision();
+            /* fully inside the wharf: containment check expected */
+            ship.x = 3760;
+            result.hitQuayInside = checkCollision();
+            /* centered in the berth, aligned and stopped: conditions met */
+            ship.x = level.berth.cx; ship.y = level.berth.cy;
+            checkBerth();
+            result.berthOK = berthConditionsMet;
+            result.buildings = (HOBART_TERRAIN.buildings || []).length;
+            result.roads = (HOBART_TERRAIN.roads || []).length;
+            result.vegetation = (HOBART_TERRAIN.vegetation || []).length;
+            result.pass = result.moved > 0.1 && result.u > 0.05 && !result.hitClear &&
+              result.hitQuayEdge && result.hitQuayInside && result.berthOK &&
+              result.buildings > 0 && result.roads > 0;
+            var div = document.createElement("div");
+            div.id = "test-result";
+            div.textContent = JSON.stringify(result);
+            document.body.appendChild(div);
+          }, 3000);
         }
-
     </script>
-  </body>
+</body>
+
 </html>

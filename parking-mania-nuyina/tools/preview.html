@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Hobart terrain preview</title>
+<style>
+  * { padding: 0; margin: 0; }
+  body { background: #222; color: #ddd; font: 13px monospace; }
+  #readout { position: fixed; top: 6px; left: 6px; background: rgba(0,0,0,0.7); padding: 6px 10px; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="readout">click the map for coordinates</div>
+<canvas id="cv"></canvas>
+<script src="../hobart-terrain.js"></script>
+<script>
+  const T = HOBART_TERRAIN;
+  const cv = document.getElementById("cv");
+  const scale = Math.min((innerWidth - 20) / T.meta.widthM, (innerHeight - 20) / T.meta.heightM);
+  cv.width = Math.ceil(T.meta.widthM * scale);
+  cv.height = Math.ceil(T.meta.heightM * scale);
+  const ctx = cv.getContext("2d");
+
+  function drawPolys(list, fill, stroke) {
+    for (const poly of list) {
+      ctx.beginPath();
+      ctx.moveTo(poly.pts[0][0] * scale, poly.pts[0][1] * scale);
+      for (let i = 1; i < poly.pts.length; i++) ctx.lineTo(poly.pts[i][0] * scale, poly.pts[i][1] * scale);
+      ctx.closePath();
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+      if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); }
+    }
+  }
+
+  ctx.fillStyle = "#0042C2";
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  drawPolys(T.land, "#C3F1D5");
+  drawPolys(T.vegetation || [], "#9BDFB4");
+  drawPolys(T.water, "#0042C2");
+  for (const r of T.roads || []) {
+    ctx.beginPath();
+    ctx.moveTo(r.pts[0][0] * scale, r.pts[0][1] * scale);
+    for (let i = 1; i < r.pts.length; i++) ctx.lineTo(r.pts[i][0] * scale, r.pts[i][1] * scale);
+    ctx.strokeStyle = "#B9C6BD";
+    ctx.lineWidth = Math.max(0.5, r.w * scale);
+    ctx.stroke();
+  }
+  ctx.lineWidth = 1;
+  drawPolys(T.buildings || [], "#DCD3C4", "#B3A896");
+  drawPolys(T.piers, "#9FCEB2", "#5f8f74");
+  drawPolys(T.bridgeDeck, "rgba(90,90,90,0.75)");
+  if (T.bridgeCenterline.length) {
+    ctx.beginPath();
+    ctx.moveTo(T.bridgeCenterline[0][0] * scale, T.bridgeCenterline[0][1] * scale);
+    for (const [x, y] of T.bridgeCenterline) ctx.lineTo(x * scale, y * scale);
+    ctx.strokeStyle = "#ff0"; ctx.stroke();
+  }
+
+  cv.addEventListener("click", (e) => {
+    const x = e.offsetX / scale, y = e.offsetY / scale;
+    const lat = T.meta.origin.lat - y / T.meta.mPerDegLat;
+    const lon = T.meta.origin.lon + x / T.meta.mPerDegLon;
+    let hit = "";
+    for (const list of [T.piers, T.water]) {
+      for (const p of list) {
+        const b = p.bbox;
+        if (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) hit = p.name;
+      }
+    }
+    const msg = `x=${x.toFixed(1)} y=${y.toFixed(1)}  lat=${lat.toFixed(5)} lon=${lon.toFixed(5)}  ${hit}`;
+    document.getElementById("readout").textContent = msg;
+    console.log(msg);
+  });
+</script>
+</body>
+</html>
