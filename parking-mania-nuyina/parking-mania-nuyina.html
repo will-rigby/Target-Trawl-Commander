@@ -573,13 +573,17 @@
           }
         }
 
-        /* faint drifting streaks that make the tidal stream visible; drawn on
-           the open water before the land goes on top */
+        /* faint drifting wave crests that make the tidal stream visible; drawn
+           on the open water before the land goes on top. Each crest lies
+           perpendicular to the flow and bows slightly downstream. */
         function drawCurrentLayer() {
           var cs = level.current.speed;
           if (cs <= 0) return;
           var cd = level.current.to * Math.PI / 180;
-          var lx = Math.sin(cd) * (8 + cs * 14), ly = -Math.cos(cd) * (8 + cs * 14);
+          var dx = Math.sin(cd), dy = -Math.cos(cd);   /* flow direction */
+          var px = -dy, py = dx;                        /* crest direction */
+          var half = 4 + cs * 7;
+          var bow = half * 0.7;
           ctx.strokeStyle = "#66B8FF";
           ctx.lineWidth = 1.6;
           ctx.lineCap = "round";
@@ -587,8 +591,9 @@
             var p = currentParticles[i];
             ctx.globalAlpha = 0.10 + 0.12 * (0.5 + 0.5 * Math.sin(simTime * 0.8 + p[2]));
             ctx.beginPath();
-            ctx.moveTo(p[0] - lx, p[1] - ly);
-            ctx.lineTo(p[0], p[1]);
+            ctx.moveTo(p[0] - px * half, p[1] - py * half);
+            ctx.quadraticCurveTo(p[0] + dx * bow, p[1] + dy * bow,
+                                 p[0] + px * half, p[1] + py * half);
             ctx.stroke();
           }
           ctx.globalAlpha = 1;
