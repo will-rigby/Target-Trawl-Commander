@@ -664,21 +664,27 @@
           ctx.fillStyle = "#C9CCC6";
           ctx.fillRect(-4, -12, 8, 5);           // exhaust casing aft of the bridge
 
-          /* cargo deck: hatch covers + white cranes to starboard */
+          /* cargo deck: hatch covers */
           ctx.fillStyle = "#2C7F50";
           ctx.fillRect(-8, -2, 16, 12);
           ctx.fillRect(-8, 14, 16, 12);
-          ctx.strokeStyle = "#F4F4F4";
-          ctx.lineWidth = 1.6;
-          ctx.beginPath();
-          ctx.moveTo(7.5, 4); ctx.lineTo(-4, -4);
-          ctx.moveTo(7.5, 26); ctx.lineTo(-4, 18);
-          ctx.stroke();
-          ctx.fillStyle = "#F4F4F4";
-          ctx.beginPath();
-          ctx.arc(7.5, 4, 2.6, 0, Math.PI * 2);
-          ctx.arc(7.5, 26, 2.6, 0, Math.PI * 2);
-          ctx.fill();
+
+          /* white crane: pedestal at (bx,by), boom out to (tx,ty) */
+          function crane(bx, by, tx, ty) {
+            ctx.strokeStyle = "#F4F4F4";
+            ctx.lineWidth = 1.6;
+            ctx.beginPath();
+            ctx.moveTo(bx, by); ctx.lineTo(tx, ty);
+            ctx.stroke();
+            ctx.fillStyle = "#F4F4F4";
+            ctx.beginPath();
+            ctx.arc(bx, by, 2.6, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          /* a crane either side at the aft end of the foredeck, booms forward */
+          crane(9, -33, 9, -43);
+          crane(-9, -33, -9, -43);
 
           /* aft deckhouse with orange lifeboats along both sides */
           ctx.fillStyle = "#F0F1EE";
@@ -699,6 +705,9 @@
           ctx.fillRect(-3.2, 60, 1.8, 8);
           ctx.fillRect(1.4, 60, 1.8, 8);
           ctx.fillRect(-1.4, 63.2, 2.8, 1.6);
+
+          /* heavy crane on the port quarter, just forward of the helideck */
+          crane(-9, 52, -2, 44);
 
           ctx.restore();
         }
