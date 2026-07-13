@@ -699,9 +699,9 @@
 
           /* Deck plan follows the Nuyina from above, bow to stern: orange flared
              bow, green winch-only foredeck with a crane either side at its aft
-             end, white bridge with full-width wings, green cargo deck with
-             hatches, white aft house flanked by lifeboats, a heavy crane to
-             port ahead of the helideck, helideck right aft. */
+             end, white bridge with full-width wings, smoke stack, open green
+             working deck, white aft house flanked by lifeboats, a heavy crane
+             to port ahead of the helideck, helideck right aft. */
 
           /* main deck (Nuyina green), inset from the red hull rim */
           ctx.beginPath();
@@ -736,13 +736,12 @@
           ctx.fillRect(-9.5, -28, 19, 22);
           ctx.fillStyle = "#E0E2DD";
           ctx.fillRect(-12.6, -26, 25.2, 5);
-          ctx.fillStyle = "#C9CCC6";
-          ctx.fillRect(-4, -12, 8, 5);           // exhaust casing aft of the bridge
-
-          /* cargo deck: hatch covers */
-          ctx.fillStyle = "#2C7F50";
-          ctx.fillRect(-8, -2, 16, 12);
-          ctx.fillRect(-8, 14, 16, 12);
+          
+          /* smoke stack aft of the bridge: dark funnel on a larger white base */
+          ctx.fillStyle = "#F0F1EE";
+          ctx.fillRect(-6.2, -2, 12.4, 11);
+          ctx.fillStyle = "#26292B";
+          ctx.fillRect(-4.2, 0, 8.4, 7);
 
           /* white crane: pedestal at (bx,by), boom out to (tx,ty) */
           function crane(bx, by, tx, ty) {
