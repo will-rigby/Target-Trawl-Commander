@@ -1008,12 +1008,13 @@
           drawBerthPointer();
         }
 
-        /* Yellow chevron on the screen edge pointing to an off-screen berth. */
+        /* Yellow chevron just inside the screen edge pointing to an off-screen
+           berth, with the ship-to-berth distance underneath. */
         function drawBerthPointer() {
           var b = level.berth;
           var sx = (b.cx - camX) * PXPM + canvas.width / 2;
           var sy = (b.cy - camY) * PXPM + canvas.height / 2;
-          var m = 26;
+          var m = 56;
           if (sx > m && sx < canvas.width - m && sy > m && sy < canvas.height - m) return;
           var cx = canvas.width / 2, cy = canvas.height / 2;
           var dx = sx - cx, dy = sy - cy;
@@ -1030,6 +1031,12 @@
           ctx.closePath();
           ctx.fill();
           ctx.restore();
+          var d = Math.hypot(b.cx - ship.x, b.cy - ship.y);
+          var label = d >= 1000 ? (d / 1000).toFixed(1) + " km" : Math.round(d) + " m";
+          ctx.font = "14px Impact";
+          ctx.fillStyle = "#FFD400";
+          var tw = ctx.measureText(label).width;
+          ctx.fillText(label, ex - tw / 2, ey + 26);
         }
 
         /* ================= screens ================= */
