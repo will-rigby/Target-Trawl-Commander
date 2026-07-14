@@ -150,7 +150,12 @@
           throttle: 0,     // -1..1
           azimuth: 0,      // rad, + deflects thrust to starboard (bow swings port)
           bowThr: 0, sternThr: 0, // -1 (port) / 0 / 1 (stbd)
+          /* visible wash: 0..1, ramps up with the thruster and lingers after it
+             stops, and holds the side the last kick was thrown to */
+          bowWash: 0, bowWashDir: 1, sternWash: 0, sternWashDir: 1,
         };
+
+        const WASH_SPIN_UP = 1.6, WASH_SPIN_DOWN = 0.45; // per second
 
         /* hull outline in ship-local meters: x' starboard, y' forward, midships origin */
         const SHIP_HULL = [
@@ -394,6 +399,18 @@
           return w.speed * (1 + 0.25 * Math.sin(simTime * 0.23) + 0.15 * Math.sin(simTime * 0.71));
         }
 
+        /* The thruster props keep turning the water over for a few seconds after
+           the button is released, so the foam builds quickly and dies away slowly. */
+        function updateWash(which, thr) {
+          var lvl = which + "Wash", dir = which + "WashDir";
+          if (thr) {
+            ship[dir] = thr;
+            ship[lvl] = Math.min(1, ship[lvl] + WASH_SPIN_UP * DT);
+          } else {
+            ship[lvl] = Math.max(0, ship[lvl] - WASH_SPIN_DOWN * DT);
+          }
+        }
+
         /* ================= physics ================= */
         function stepShip() {
           /* controls -> actuators */
@@ -403,6 +420,8 @@
           if (dPressed || rightPressed) ship.azimuth = Math.max(-AZIMUTH_MAX, ship.azimuth - AZIMUTH_RATE * DT);
           ship.bowThr = (bowStbd ? 1 : 0) - (bowPort ? 1 : 0);
           ship.sternThr = (sternStbd ? 1 : 0) - (sternPort ? 1 : 0);
+          updateWash("bow", ship.bowThr);
+          updateWash("stern", ship.sternThr);
 
           /* body-frame forces (kN) and yaw moment (kN*m)
              azimuth > 0 deflects thrust to starboard: the stern kicks starboard
@@ -573,27 +592,28 @@
           }
         }
 
-        /* faint drifting wave crests that make the tidal stream visible; drawn
-           on the open water before the land goes on top. Each crest lies
-           perpendicular to the flow and bows slightly downstream. */
+        /* faint drifting wave crests that make the tidal stream visible: each
+           crest lies across the flow and bows downstream; drawn on the open
+           water before the land goes on top */
         function drawCurrentLayer() {
           var cs = level.current.speed;
           if (cs <= 0) return;
           var cd = level.current.to * Math.PI / 180;
-          var dx = Math.sin(cd), dy = -Math.cos(cd);   /* flow direction */
-          var px = -dy, py = dx;                        /* crest direction */
-          var half = 4 + cs * 7;
-          var bow = half * 0.7;
+          var fx = Math.sin(cd), fy = -Math.cos(cd);   // unit vector along the flow
+          var cx = -fy, cy = fx;                        // across the flow: the crest line
+          var half = 6 + cs * 7;                        // crest half-length, m
+          var bulge = 1.5 + cs * 3;                     // how far the crest bows downstream
           ctx.strokeStyle = "#66B8FF";
           ctx.lineWidth = 1.6;
           ctx.lineCap = "round";
           for (var i = 0; i < currentParticles.length; i++) {
             var p = currentParticles[i];
+            var len = half * (0.6 + 0.4 * Math.sin(p[2] * 3.1));
             ctx.globalAlpha = 0.10 + 0.12 * (0.5 + 0.5 * Math.sin(simTime * 0.8 + p[2]));
             ctx.beginPath();
-            ctx.moveTo(p[0] - px * half, p[1] - py * half);
-            ctx.quadraticCurveTo(p[0] + dx * bow, p[1] + dy * bow,
-                                 p[0] + px * half, p[1] + py * half);
+            ctx.moveTo(p[0] - cx * len, p[1] - cy * len);
+            ctx.quadraticCurveTo(p[0] + fx * bulge, p[1] + fy * bulge,
+                                 p[0] + cx * len, p[1] + cy * len);
             ctx.stroke();
           }
           ctx.globalAlpha = 1;
@@ -664,10 +684,35 @@
           ctx.globalAlpha = 1;
         }
 
+        /* Foam boiling out of a tunnel thruster, in ship-local canvas coords
+           (x' starboard, y' aft). A thruster pushing the hull to `dir` (+1 stbd)
+           fires its jet out of the opposite side, so the white water sits on the
+           far beam and washes away from the hull. */
+        function drawThrusterWash(yLocal, dir, level) {
+          if (level <= 0.01) return;
+          var side = -dir;
+          var x0 = side * 12.8;   // hull side at the tunnel mouth
+          ctx.fillStyle = "#FFFFFF";
+          for (var i = 0; i < 9; i++) {
+            var ph = (simTime * 0.4 + i / 9) % 1;      // 0..1 as the blob runs out
+            var drift = Math.sin(i * 2.7 + yLocal) * 4 * ph;
+            ctx.globalAlpha = 0.5 * (1 - ph) * level;
+            ctx.beginPath();
+            ctx.arc(x0 + side * ph * 22 * level, yLocal + drift,
+                    1.5 + ph * 4.5 * level, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+        }
+
         function drawShip() {
           ctx.save();
           ctx.translate(ship.x, ship.y);
           ctx.rotate(ship.heading);
+
+          /* tunnel thruster wash */
+          drawThrusterWash(-58, ship.bowWashDir, ship.bowWash);
+          drawThrusterWash(62, ship.sternWashDir, ship.sternWash);
 
           /* prop wash showing azimuth direction */
           if (Math.abs(ship.throttle) > 0.05) {
@@ -1175,6 +1220,7 @@
           ship.u = 0; ship.v = 0; ship.r = 0;
           ship.throttle = 0; ship.azimuth = 0;
           ship.bowThr = 0; ship.sternThr = 0;
+          ship.bowWash = 0; ship.sternWash = 0;
           simTime = 0;
           holdTimer = 0;
           berthConditionsMet = false;
