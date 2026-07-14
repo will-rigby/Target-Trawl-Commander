@@ -202,35 +202,54 @@
             wind: { speed: 2, from: 140, gust: false },
             current: { speed: 0, to: 0 },
             traffic: {
-              boats: { count: 7, area: sgArea(1.4450, 103.8950, 1.3450, 104.0650) },
+              boats: { count: 12, area: sgArea(1.4450, 103.8950, 1.3450, 104.0650) },
               vessels: [
                 { kind: "cargo", path: SG_ROUTE_SERANGOON, dockHold: 90, startFrac: 0.45 },
+                { kind: "cargo", path: SG_ROUTE_SERANGOON, dockHold: 150, startFrac: 0.05 },
                 { kind: "lng", path: SG_ROUTE_LANGSAT, dockHold: 120, startFrac: 0.2 },
                 { kind: "cargo", path: SG_ROUTE_PGUDANG, dockHold: 90, startFrac: 0.6 },
+                { kind: "cargo", path: SG_ROUTE_PGUDANG_OUT, dockHold: 60, startFrac: 0.3 },
+              ],
+              moored: [   // riding to anchor off Punggol and in the Changi fairway
+                sgMoored("cargo", 1.4245, 103.9010, 140),
+                sgMoored("lng", 1.3760, 104.0100, 125),
+                sgMoored("cargo", 1.3630, 104.0330, 150),
               ] } },
           { name: "Level 8 - Singapore: the Johor Strait",
-            brief: "Weigh anchor and run west along the strait to Sembawang. Come alongside the shipyard wharf, dead slow. Watch for the LNG carrier working across to Senoko.",
+            brief: "Weigh anchor and run west along the strait to Sembawang. Come alongside the shipyard wharf, dead slow. Watch for the LNG carriers working across to Senoko.",
             terrain: "singapore",
             start: sgStart(1.4300, 103.9050, 285),
-            berth: sgBerth(1.4647000, 103.8240800, 29, 170, 22),
+            berth: sgBerth(1.4660562, 103.8258936, 29.9, 190, 26),
             wind: { speed: 2, from: 135, gust: false },
             current: { speed: 0, to: 0 },
             traffic: {
-              boats: { count: 7, area: sgArea(1.4700, 103.7900, 1.4200, 103.9200) },
+              boats: { count: 12, area: sgArea(1.4700, 103.7900, 1.4200, 103.9200) },
               vessels: [
                 { kind: "lng", path: SG_ROUTE_SENOKO, dockHold: 150, startFrac: 0.1 },
+                { kind: "lng", path: SG_ROUTE_SENOKO, dockHold: 120, startFrac: 0.55 },
                 { kind: "cargo", path: SG_ROUTE_PGUDANG_OUT, dockHold: 60, startFrac: 0.05 },
+                { kind: "cargo", path: SG_ROUTE_PGUDANG, dockHold: 90, startFrac: 0.35 },
                 { kind: "cargo", path: SG_ROUTE_SERANGOON, dockHold: 90, startFrac: 0.7 },
+              ],
+              moored: [   // anchorage east of Sembawang + ships working the wharves
+                sgMoored("cargo", 1.4450, 103.8760, 135),
+                sgMoored("lng", 1.4460, 103.8790, 150),
+                sgMoored("cargo", 1.4693522, 103.8283168, 28.1),
+                sgMoored("cargo", 1.4702934, 103.8299500, 119.8),
               ] } },
           { name: "Level 9 - King George VI graving dock",
             brief: "160 m of ship, 45 m of dock. Ease her off the wharf, line up the entrance, and put her on the blocks. No pressure.",
             terrain: "singapore",
-            start: sgStart(1.4647000, 103.8240800, 29),
+            start: sgStart(1.4660562, 103.8258936, 29.9),
             berth: sgBerth(1.4624029, 103.8231973, 29.4, 240, 14),
             wind: { speed: 1, from: 90, gust: false },
             current: { speed: 0, to: 0 },
             traffic: {
-              boats: { count: 2, area: sgArea(1.4680, 103.8150, 1.4560, 103.8320) } } },
+              boats: { count: 4, area: sgArea(1.4700, 103.8150, 1.4560, 103.8330) },
+              moored: [   // neighbours alongside the Sembawang wharves
+                sgMoored("cargo", 1.4693522, 103.8283168, 28.1),
+                sgMoored("cargo", 1.4702934, 103.8299500, 119.8),
+              ] } },
         ];
 
         /* ================= game state ================= */
@@ -1889,16 +1908,18 @@
           gameState = "playing";
           wPressed = true;
           var sgT0 = null, sgMoved = -1, sgU = -1;
-          var vIdx = -1, vPos = null, bIdx = -1;
+          var vIdx = -1, vPos = null, bIdx = -1, mIdx = -1, mPos = null;
           setTimeout(function() { sgT0 = { x: ship.x, y: ship.y }; }, 500);
           setTimeout(function() {
             sgMoved = sgT0 ? distance(sgT0.x, sgT0.y, ship.x, ship.y) : -1;
             sgU = ship.u;
             for (var i = 0; i < npcs.length; i++) {
               if (npcs[i].path && vIdx < 0) vIdx = i;
-              if (!npcs[i].path && bIdx < 0) bIdx = i;
+              if (npcs[i].kind === "launch" && bIdx < 0) bIdx = i;
+              if (npcs[i].moored && mIdx < 0) mIdx = i;
             }
             if (vIdx >= 0) vPos = { x: npcs[vIdx].x, y: npcs[vIdx].y };
+            if (mIdx >= 0) mPos = { x: npcs[mIdx].x, y: npcs[mIdx].y };
             /* park in open water east of the anchorage (NOT in the berth
                zone, which would end the level and freeze the traffic) and
                drop a boat alongside: it should clear off within seconds */
@@ -1916,6 +1937,8 @@
               Math.round(distance(vPos.x, vPos.y, npcs[vIdx].x, npcs[vIdx].y)) : -1;
             result.boatFled = bIdx >= 0 ?
               Math.round(distance(ship.x, ship.y, npcs[bIdx].x, npcs[bIdx].y) - 60) : -1;
+            result.mooredStill = mIdx >= 0 && mPos ?
+              distance(mPos.x, mPos.y, npcs[mIdx].x, npcs[mIdx].y) < 1 : false;
             /* teleport checks against the Singapore map */
             var clearPt = sgPt([1.3600, 104.0430]);
             ship.heading = 305 * Math.PI / 180;
@@ -1925,8 +1948,10 @@
             var punggol = sgPt([1.3980, 103.9080]);
             ship.x = punggol[0]; ship.y = punggol[1];
             result.hitPunggol = checkCollision();
-            /* the carve regression: sit her in the graving dock */
+            /* the level-9 wharf start must be clear water off the quay */
             startLevel(8);
+            result.hitWharfStart = checkCollision() || checkNpcCollision();
+            /* the carve regression: sit her in the graving dock */
             ship.heading = level.berth.hdg * Math.PI / 180;
             ship.u = 0; ship.v = 0; ship.r = 0;
             ship.x = level.berth.cx; ship.y = level.berth.cy;
@@ -1944,7 +1969,8 @@
             bakeTerrain();
             result.bakeMs = Math.round((performance.now() - tc) * 100) / 100;
             result.pass = result.moved > 0.1 && result.u > 0.05 &&
-              result.npcs >= 5 && result.vesselMoved > 20 && result.boatFled > 10 &&
+              result.npcs >= 15 && result.vesselMoved > 20 && result.boatFled > 10 &&
+              result.mooredStill && !result.hitWharfStart &&
               !result.hitClear && result.hitPunggol && !result.hitDock &&
               result.dockBerthOK && result.land > 0 && result.buildings > 0 &&
               result.roads > 0;
