@@ -123,6 +123,10 @@
           return [a[0], a[1], b[0], b[1]];
         }
         function sgPath(lls) { return lls.map(sgPt); }
+        function sgMoored(kind, lat, lon, hdg) {   // ship at anchor or alongside: never moves
+          var p = sgPt([lat, lon]);
+          return { kind: kind, x: p[0], y: p[1], hdg: hdg };
+        }
 
         /* Commercial traffic routes: fairway waypoints ending at a working
            berth. These vessels hold their track and will not give way -
@@ -270,10 +274,10 @@
           return [[0, l2], [b2, l2 - len * 0.18], [b2, -l2 + len * 0.06], [b2 * 0.7, -l2],
                   [-b2 * 0.7, -l2], [-b2, -l2 + len * 0.06], [-b2, l2 - len * 0.18]];
         }
-        const NPC_KINDS = {
-          launch: { len: 14, beam: 4.5, speed: 5.0, turn: 0.9 },   // turn in rad/s
-          lng:    { len: 290, beam: 46, speed: 4.0, turn: 0.03 },
-          cargo:  { len: 200, beam: 32, speed: 5.0, turn: 0.05 },
+        const NPC_KINDS = {   // turn in rad/s; wakeLen/wakeR = trail samples and dot radius (m)
+          launch: { len: 14, beam: 4.5, speed: 5.0, turn: 0.35, wakeLen: 25, wakeR: 1.5 },
+          lng:    { len: 290, beam: 46, speed: 4.0, turn: 0.02, wakeLen: 45, wakeR: 4 },
+          cargo:  { len: 200, beam: 32, speed: 5.0, turn: 0.032, wakeLen: 45, wakeR: 4 },
         };
         for (var k in NPC_KINDS) NPC_KINDS[k].hull = makeNpcHull(NPC_KINDS[k].len, NPC_KINDS[k].beam);
         var npcs = [];
@@ -715,11 +719,17 @@
               var p = sampleWater(80);
               if (!p) break;
               npcs.push({ kind: "launch", x: p[0], y: p[1], hdg: Math.random() * Math.PI * 2,
-                          spd: 0, tx: p[0], ty: p[1], retarget: 0, blocked: 0 });
+                          spd: 0, tx: p[0], ty: p[1], retarget: 0, blocked: 0,
+                          wake: [], wakeCtr: 0 });
             }
           }
           var vs = tr.vessels || [];
           for (var v = 0; v < vs.length; v++) npcs.push(spawnVessel(vs[v]));
+          var ms = tr.moored || [];
+          for (var m = 0; m < ms.length; m++) {
+            npcs.push({ kind: ms[m].kind, x: ms[m].x, y: ms[m].y,
+                        hdg: ms[m].hdg * Math.PI / 180, spd: 0, moored: true });
+          }
         }
 
         function spawnVessel(cfg) {
@@ -737,7 +747,7 @@
           var x = path[seg][0] + (path[seg + 1][0] - path[seg][0]) * t;
           var y = path[seg][1] + (path[seg + 1][1] - path[seg][1]) * t;
           return { kind: cfg.kind, path: path, cfg: cfg, seg: seg + 1, state: "run", holdT: 0,
-                   x: x, y: y, spd: NPC_KINDS[cfg.kind].speed,
+                   x: x, y: y, spd: NPC_KINDS[cfg.kind].speed, wake: [], wakeCtr: 0,
                    hdg: Math.atan2(path[seg + 1][0] - path[seg][0], -(path[seg + 1][1] - path[seg][1])) };
         }
 
@@ -755,10 +765,14 @@
             }
             return;
           }
+          /* intermediate waypoints advance within the turning radius so a slow-
+             turning hull cuts the corner instead of orbiting a missed mark;
+             the final (dock) waypoint keeps the tight 60 m trigger */
+          var adv = Math.max(60, 0.6 * kind.speed / kind.turn);
           var wp = n.path[n.seg];
           var d = distance(n.x, n.y, wp[0], wp[1]);
           var last = n.seg === n.path.length - 1;
-          if (d < 60) {
+          if (d < (last ? 60 : adv)) {
             if (last) { n.state = "dock"; n.holdT = n.cfg.dockHold || 60; return; }
             n.seg++;
             wp = n.path[n.seg];
@@ -782,10 +796,34 @@
           return [v[0] + dx / d * w, v[1] + dy / d * w];
         }
 
-        function clearAhead(x, y, hdg) {
+        /* A whisker probe point is fouled if it is off the water OR inside the
+           (inflated) box of a big hull - the player's ship or any working or
+           moored vessel. The launches treat ships exactly like land, so they
+           never steer a course that crosses one. */
+        function boxBlocked(px, py, cx, cy, hdg, halfLen, halfBeam) {
+          var dx = px - cx, dy = py - cy;
+          var along = dx * Math.sin(hdg) - dy * Math.cos(hdg);
+          var across = dx * Math.cos(hdg) + dy * Math.sin(hdg);
+          return Math.abs(along) < halfLen && Math.abs(across) < halfBeam;
+        }
+
+        function probeFouled(n, px, py) {
+          if (!isWater(px, py)) return true;
+          if (boxBlocked(px, py, ship.x, ship.y, ship.heading, 95, 26)) return true;
+          for (var i = 0; i < npcs.length; i++) {
+            var o = npcs[i];
+            if (o === n || !(o.path || o.moored)) continue;
+            var k = NPC_KINDS[o.kind];
+            if (boxBlocked(px, py, o.x, o.y, o.hdg, k.len / 2 + 15, k.beam / 2 + 12)) return true;
+          }
+          return false;
+        }
+
+        function clearAhead(n, x, y, hdg) {
           var sx = Math.sin(hdg), sy = -Math.cos(hdg);
-          return isWater(x + sx * 25, y + sy * 25) && isWater(x + sx * 50, y + sy * 50) &&
-                 isWater(x + sx * 75, y + sy * 75);
+          return !probeFouled(n, x + sx * 25, y + sy * 25) &&
+                 !probeFouled(n, x + sx * 50, y + sy * 50) &&
+                 !probeFouled(n, x + sx * 75, y + sy * 75);
         }
 
         function stepBoat(n) {
@@ -796,30 +834,41 @@
             if (p) { n.tx = p[0]; n.ty = p[1]; }
             n.retarget = 60;
           }
-          /* desired velocity: wander target, plus keep clear of the player
-             and of the working traffic */
+          /* desired COURSE: wander target, plus keep clear of the player, the
+             working traffic, and (lightly) the other launches. The vector only
+             picks the heading - like a real boat, avoidance is a course
+             alteration at cruise speed, not a speed change. */
           var d = distance(n.x, n.y, n.tx, n.ty) || 1;
           var v = [(n.tx - n.x) / d * kind.speed, (n.ty - n.y) / d * kind.speed];
           v = fleeFrom(n, ship.x, ship.y, 400, 1.6, v);
           for (var i = 0; i < npcs.length; i++) {
-            if (npcs[i].path) v = fleeFrom(n, npcs[i].x, npcs[i].y, 500, 1.2, v);
+            var o = npcs[i];
+            if (o === n) continue;
+            if (o.path || o.moored) v = fleeFrom(n, o.x, o.y, 500, 1.2, v);
+            else v = fleeFrom(n, o.x, o.y, 80, 0.5, v);
           }
           var want = Math.atan2(v[0], -v[1]);
           /* whiskers: take the first heading with open water ahead */
           var offsets = [0, -0.5, 0.5, -1.0, 1.0];
           var pick = null;
           for (var o = 0; o < offsets.length; o++) {
-            if (clearAhead(n.x, n.y, want + offsets[o])) { pick = want + offsets[o]; break; }
+            if (clearAhead(n, n.x, n.y, want + offsets[o])) { pick = want + offsets[o]; break; }
           }
-          var targetSpd = Math.min(Math.hypot(v[0], v[1]), kind.speed * 1.4);
+          var targetSpd = kind.speed;
           if (pick === null) {
             pick = n.hdg + 2 * kind.turn * DT;   // boxed in: slow hard turn
             targetSpd = 0.5;
             n.blocked += DT;
           } else {
             n.blocked = 0;
+            /* something dead ahead on the CURRENT course: crash-stop while
+               the new course comes on */
+            if (!clearAhead(n, n.x, n.y, n.hdg)) targetSpd = 0.8;
           }
-          var maxTurn = kind.turn * DT;
+          /* close to the player a launch throws the helm over much harder -
+             at range it holds lazy, boat-like arcs */
+          var urg = Math.max(0, Math.min(1, 1 - distance(n.x, n.y, ship.x, ship.y) / 200));
+          var maxTurn = kind.turn * (1 + 2 * urg) * DT;
           n.hdg += Math.max(-maxTurn, Math.min(maxTurn, angNormRad(pick - n.hdg)));
           n.spd += Math.max(-1.0 * DT, Math.min(1.0 * DT, targetSpd - n.spd));
           n.x += Math.sin(n.hdg) * n.spd * DT;
@@ -830,10 +879,28 @@
           }
         }
 
+        /* stern-water trail, same scheme as the player's wake: a sample every
+           WAKE_EVERY steps while making way, fading out along the trail */
+        function pushNpcWake(n) {
+          var kind = NPC_KINDS[n.kind];
+          n.wakeCtr++;
+          if (n.wakeCtr < WAKE_EVERY) return;
+          n.wakeCtr = 0;
+          if (n.spd > 1) {
+            n.wake.push([n.x - Math.sin(n.hdg) * kind.len / 2,
+                         n.y + Math.cos(n.hdg) * kind.len / 2]);
+          }
+          if (n.wake.length > kind.wakeLen ||
+              (n.spd <= 1 && n.wake.length)) n.wake.shift();
+        }
+
         function stepNpcs() {
           for (var i = 0; i < npcs.length; i++) {
-            if (npcs[i].path) stepVessel(npcs[i]);
-            else stepBoat(npcs[i]);
+            var n = npcs[i];
+            if (n.moored) continue;
+            if (n.path) stepVessel(n);
+            else stepBoat(n);
+            pushNpcWake(n);
           }
         }
 
@@ -936,6 +1003,22 @@
             if (n.path && n.state === "run" &&
                 distance(n.x, n.y, ship.x, ship.y) < 1800) drawNpcRoute(n);
           }
+          ctx.fillStyle = "#FFFFFF";                // wakes under the hulls too
+          for (var i = 0; i < npcs.length; i++) {
+            var n = npcs[i];
+            if (!n.wake || !n.wake.length) continue;
+            var kind = NPC_KINDS[n.kind];
+            var m = kind.len + 300;   // trail streams well aft of the hull
+            if (n.x + m < vb.minx || n.x - m > vb.maxx ||
+                n.y + m < vb.miny || n.y - m > vb.maxy) continue;
+            for (var w = 0; w < n.wake.length; w++) {
+              ctx.globalAlpha = 0.25 * (w + 1) / n.wake.length;
+              ctx.beginPath();
+              ctx.arc(n.wake[w][0], n.wake[w][1], kind.wakeR, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+          ctx.globalAlpha = 1;
           for (var i = 0; i < npcs.length; i++) {
             var n = npcs[i];
             var kind = NPC_KINDS[n.kind];
