@@ -320,7 +320,7 @@
 
         const GAME_KEYS = ["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
           "KeyW", "KeyS", "KeyA", "KeyD", "KeyI", "KeyO", "KeyK", "KeyL", "KeyX", "KeyR",
-          "KeyC", "Numpad7", "Numpad9", "Numpad1", "Numpad3"];
+          "KeyC", "KeyE", "Numpad7", "Numpad9", "Numpad1", "Numpad3"];
 
         function keyDownHandler(e) {
           if (e.code == "KeyW") { wPressed = true; }
@@ -336,6 +336,7 @@
           else if (e.code == "KeyK" || e.code == "Numpad1") { sternPort = true; }
           else if (e.code == "KeyL" || e.code == "Numpad3") { sternStbd = true; }
           else if (e.code == "KeyX") { ship.throttle = 0; ship.azimuth = 0; }
+          else if (e.code == "KeyE") { ship.azimuth = 0; }
           else if (e.code == "KeyC") { debugOverlay = !debugOverlay; }
           else if (e.code == "KeyR") { if (gameState == "playing") resetLevel(); }
           else if (e.code == "Space") { handleSpace(); }
@@ -1714,7 +1715,7 @@
           drawCenteredText("A / D - steer (rotate the azimuth thrusters)", textY, "24px Impact"); textY += lineSpacing;
           drawCenteredText("I / O - bow thruster to port / starboard (Numpad 7 / 9)", textY, "24px Impact"); textY += lineSpacing;
           drawCenteredText("K / L - stern thruster to port / starboard (Numpad 1 / 3)", textY, "24px Impact"); textY += lineSpacing;
-          drawCenteredText("Space / X - all stop     R - retry     C - nav debug", textY, "24px Impact"); textY += lineSpacing;
+          drawCenteredText("E - centre the helm     Space / X - all stop     R - retry     C - nav debug", textY, "24px Impact"); textY += lineSpacing;
           drawCenteredText("Hold her inside the yellow berth, aligned and dead slow, for 3 seconds.", textY, "20px Impact");
 
           drawCenteredText("HIT SPACE TO START", 560 + oy, "28px Impact");
