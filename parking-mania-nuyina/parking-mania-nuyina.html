@@ -301,12 +301,10 @@
         for (var k in NPC_KINDS) NPC_KINDS[k].hull = makeNpcHull(NPC_KINDS[k].len, NPC_KINDS[k].beam);
         var npcs = [];
 
+        /* particle arrays are (re)built by the scatter functions; the counts
+           scale with canvas area so density stays even on big screens */
         var windParticles = [];
-        for (var i = 0; i < WIND_PARTICLE_COUNT; i++) windParticles.push([0, 0]);
-
-        /* current streaks: [x, y, shimmer phase] */
-        var currentParticles = [];
-        for (var i = 0; i < CURRENT_PARTICLE_COUNT; i++) currentParticles.push([0, 0, Math.random() * Math.PI * 2]);
+        var currentParticles = [];   // [x, y, shimmer phase]
 
         var wake = [];
         const WAKE_LENGTH = 60, WAKE_EVERY = 12; // frames between samples
@@ -1060,19 +1058,28 @@
           return { minx: camX - hw, miny: camY - hh, maxx: camX + hw, maxy: camY + hh };
         }
 
+        function particleCount(base) {   // base counts were tuned at 960x640
+          return Math.round(base * Math.min(4, canvas.width * canvas.height / (960 * 640)));
+        }
+
         function scatterWindParticles() {
           var vb = viewBounds(20);
-          for (var i = 0; i < windParticles.length; i++) {
-            windParticles[i] = [vb.minx + Math.random() * (vb.maxx - vb.minx),
-                                vb.miny + Math.random() * (vb.maxy - vb.miny)];
+          windParticles = [];
+          var count = particleCount(WIND_PARTICLE_COUNT);
+          for (var i = 0; i < count; i++) {
+            windParticles.push([vb.minx + Math.random() * (vb.maxx - vb.minx),
+                                vb.miny + Math.random() * (vb.maxy - vb.miny)]);
           }
         }
 
         function scatterCurrentParticles() {
           var vb = viewBounds(20);
-          for (var i = 0; i < currentParticles.length; i++) {
-            currentParticles[i][0] = vb.minx + Math.random() * (vb.maxx - vb.minx);
-            currentParticles[i][1] = vb.miny + Math.random() * (vb.maxy - vb.miny);
+          currentParticles = [];
+          var count = particleCount(CURRENT_PARTICLE_COUNT);
+          for (var i = 0; i < count; i++) {
+            currentParticles.push([vb.minx + Math.random() * (vb.maxx - vb.minx),
+                                   vb.miny + Math.random() * (vb.maxy - vb.miny),
+                                   Math.random() * Math.PI * 2]);
           }
         }
 
@@ -1695,11 +1702,13 @@
           ctx.fillStyle = "#F95903";
           ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+          /* the layout was authored on a 640-high canvas; centre that block */
+          var oy = (canvas.height - 640) / 2;
           ctx.fillStyle = "#FFFFFF";
-          drawCenteredText("Parking Mania: Nuyina", 150, "70px Impact");
-          drawCenteredText("Berth the icebreaker RSV Nuyina: Hobart, then a Singapore refit.", 200, "22px Impact");
+          drawCenteredText("Parking Mania: Nuyina", 150 + oy, "70px Impact");
+          drawCenteredText("Berth the icebreaker RSV Nuyina: Hobart, then a Singapore refit.", 200 + oy, "22px Impact");
 
-          var textY = 270;
+          var textY = 270 + oy;
           var lineSpacing = 32;
           drawCenteredText("W / S - throttle ahead and astern", textY, "24px Impact"); textY += lineSpacing;
           drawCenteredText("A / D - steer (rotate the azimuth thrusters)", textY, "24px Impact"); textY += lineSpacing;
@@ -1708,7 +1717,7 @@
           drawCenteredText("Space / X - all stop     R - retry     C - nav debug", textY, "24px Impact"); textY += lineSpacing;
           drawCenteredText("Hold her inside the yellow berth, aligned and dead slow, for 3 seconds.", textY, "20px Impact");
 
-          drawCenteredText("HIT SPACE TO START", 560, "28px Impact");
+          drawCenteredText("HIT SPACE TO START", 560 + oy, "28px Impact");
           ctx.font = "12px Arial";
           ctx.fillStyle = "#FFE0CC";
           ctx.fillText("1-9: jump to a level", 10, canvas.height - 8);
@@ -1847,6 +1856,22 @@
           else if (gameState == "berthed") drawBerthedPanel();
           else if (gameState == "complete") drawCompletePanel();
         }
+
+        /* ================= canvas sizing =================
+           The canvas fills the browser window (never smaller than the original
+           960x640) at the same zoom, so a bigger screen simply sees more of
+           the harbour. Every HUD element already lays out from canvas.width/
+           height; the terrain bake and the particle fields are rebuilt to the
+           new viewport. */
+        function fitCanvas() {
+          canvas.width = Math.max(960, window.innerWidth);
+          canvas.height = Math.max(640, window.innerHeight);
+          terrainBox = null;   // view may outgrow the baked rect: re-bake
+          scatterWindParticles();
+          scatterCurrentParticles();
+        }
+        window.addEventListener("resize", fitCanvas);
+        fitCanvas();
 
         setInterval(gameLoop, 20);
 
