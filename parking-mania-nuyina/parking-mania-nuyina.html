@@ -573,22 +573,23 @@
           ctx.translate(-camX, -camY);
         }
 
-        function drawPolyPath(pts) {
-          ctx.beginPath();
-          ctx.moveTo(pts[0][0], pts[0][1]);
-          for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-          ctx.closePath();
+        /* g is the target context: the live canvas, or the terrain bake buffer */
+        function drawPolyPath(g, pts) {
+          g.beginPath();
+          g.moveTo(pts[0][0], pts[0][1]);
+          for (var i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
+          g.closePath();
         }
 
-        function drawPolyList(list, vb, fill, stroke) {
-          ctx.fillStyle = fill;
-          if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1 / PXPM; }
+        function drawPolyList(g, list, vb, fill, stroke) {
+          g.fillStyle = fill;
+          if (stroke) { g.strokeStyle = stroke; g.lineWidth = 1 / PXPM; }
           for (var i = 0; i < list.length; i++) {
             var b = list[i].bbox;
             if (b[2] < vb.minx || b[0] > vb.maxx || b[3] < vb.miny || b[1] > vb.maxy) continue;
-            drawPolyPath(list[i].pts);
-            ctx.fill();
-            if (stroke) ctx.stroke();
+            drawPolyPath(g, list[i].pts);
+            g.fill();
+            if (stroke) g.stroke();
           }
         }
 
@@ -619,32 +620,72 @@
           ctx.globalAlpha = 1;
         }
 
-        function drawRoads(vb) {
+        function drawRoads(g, vb) {
           var roads = HOBART_TERRAIN.roads || [];
-          ctx.strokeStyle = "#B9C6BD";
-          ctx.lineCap = "round";
-          ctx.lineJoin = "round";
+          g.strokeStyle = "#B9C6BD";
+          g.lineCap = "round";
+          g.lineJoin = "round";
           for (var i = 0; i < roads.length; i++) {
             var r = roads[i], b = r.bbox;
             if (b[2] < vb.minx || b[0] > vb.maxx || b[3] < vb.miny || b[1] > vb.maxy) continue;
-            ctx.lineWidth = r.w;
-            ctx.beginPath();
-            ctx.moveTo(r.pts[0][0], r.pts[0][1]);
-            for (var j = 1; j < r.pts.length; j++) ctx.lineTo(r.pts[j][0], r.pts[j][1]);
-            ctx.stroke();
+            g.lineWidth = r.w;
+            g.beginPath();
+            g.moveTo(r.pts[0][0], r.pts[0][1]);
+            for (var j = 1; j < r.pts.length; j++) g.lineTo(r.pts[j][0], r.pts[j][1]);
+            g.stroke();
           }
+        }
+
+        /* ---- static terrain bake ----
+           The shore never moves, only the camera does, so the ~450 buildings and
+           ~250 roads in view are rendered once into an offscreen buffer that
+           covers the viewport plus TERRAIN_SLACK of headroom on every side. The
+           frame then costs one drawImage, and we only re-bake when the ship has
+           sailed far enough for the view to reach the edge of the buffer. */
+        const TERRAIN_SLACK = 500;  // m of headroom around the view
+        /* The camera moves in fractional pixels, so the buffer is blitted at a
+           fractional offset and gets resampled. Baking at 2x screen resolution
+           keeps the shoreline crisp through that resample - snapping the camera
+           to whole pixels would be sharper still, but it makes the world judder
+           in 1 px steps at berthing speeds. */
+        const TERRAIN_SS = 2;
+        var terrainBuf = document.createElement("canvas");
+        var terrainBufCtx = terrainBuf.getContext("2d");
+        var terrainBox = null;      // world rect the buffer currently holds
+
+        function bakeTerrain() {
+          var res = PXPM * TERRAIN_SS;   // buffer px per meter
+          var hw = canvas.width / 2 / PXPM + TERRAIN_SLACK;
+          var hh = canvas.height / 2 / PXPM + TERRAIN_SLACK;
+          var x0 = camX - hw, y0 = camY - hh;
+          var wpx = Math.ceil(hw * 2 * res), hpx = Math.ceil(hh * 2 * res);
+          var box = { minx: x0, miny: y0, maxx: x0 + wpx / res, maxy: y0 + hpx / res };
+
+          var g = terrainBufCtx;
+          if (terrainBuf.width !== wpx || terrainBuf.height !== hpx) {
+            terrainBuf.width = wpx; terrainBuf.height = hpx;   // also clears
+          } else {
+            g.setTransform(1, 0, 0, 1, 0, 0);
+            g.clearRect(0, 0, wpx, hpx);
+          }
+          g.setTransform(res, 0, 0, res, -x0 * res, -y0 * res);
+          drawPolyList(g, HOBART_TERRAIN.land, box, "#C3F1D5");
+          drawPolyList(g, HOBART_TERRAIN.vegetation || [], box, "#9BDFB4");
+          drawPolyList(g, HOBART_TERRAIN.water, box, "#0042C2");
+          drawRoads(g, box);
+          drawPolyList(g, HOBART_TERRAIN.buildings || [], box, "#DCD3C4", "#B3A896");
+          drawPolyList(g, HOBART_TERRAIN.piers, box, "#9FCEB2", "#6B9C80");
+          terrainBox = box;
         }
 
         function drawTerrain(vb) {
           ctx.fillStyle = "#0042C2";
           ctx.fillRect(vb.minx, vb.miny, vb.maxx - vb.minx, vb.maxy - vb.miny);
           drawCurrentLayer();
-          drawPolyList(HOBART_TERRAIN.land, vb, "#C3F1D5");
-          drawPolyList(HOBART_TERRAIN.vegetation || [], vb, "#9BDFB4");
-          drawPolyList(HOBART_TERRAIN.water, vb, "#0042C2");
-          drawRoads(vb);
-          drawPolyList(HOBART_TERRAIN.buildings || [], vb, "#DCD3C4", "#B3A896");
-          drawPolyList(HOBART_TERRAIN.piers, vb, "#9FCEB2", "#6B9C80");
+          if (!terrainBox || vb.minx < terrainBox.minx || vb.maxx > terrainBox.maxx ||
+              vb.miny < terrainBox.miny || vb.maxy > terrainBox.maxy) bakeTerrain();
+          ctx.drawImage(terrainBuf, terrainBox.minx, terrainBox.miny,
+                        terrainBox.maxx - terrainBox.minx, terrainBox.maxy - terrainBox.miny);
         }
 
         function drawBerthZone() {
@@ -664,12 +705,12 @@
         }
 
         function drawPylons(vb) {
-          drawPolyList(PYLONS, vb, "#3D3D3D", "#222222");
+          drawPolyList(ctx, PYLONS, vb, "#3D3D3D", "#222222");
         }
 
         function drawBridgeDeck(vb) {
           ctx.globalAlpha = 0.5;
-          drawPolyList(HOBART_TERRAIN.bridgeDeck, vb, "#6E6E6E", "#4A4A4A");
+          drawPolyList(ctx, HOBART_TERRAIN.bridgeDeck, vb, "#6E6E6E", "#4A4A4A");
           ctx.globalAlpha = 1;
         }
 
@@ -1229,6 +1270,7 @@
           collidables = HOBART_TERRAIN.land.concat(HOBART_TERRAIN.piers, PYLONS);
           camX = ship.x;
           camY = ship.y;
+          bakeTerrain();  // bake the new shore now rather than hitching on frame one
           scatterWindParticles();
           scatterCurrentParticles();
           gameState = "intro";
