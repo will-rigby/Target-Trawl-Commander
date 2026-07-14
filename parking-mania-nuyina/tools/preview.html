@@ -2,63 +2,105 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Hobart terrain preview</title>
+<title>Terrain preview</title>
 <style>
   * { padding: 0; margin: 0; }
-  body { background: #222; color: #ddd; font: 13px monospace; }
+  body { background: #222; color: #ddd; font: 13px monospace; overflow: hidden; }
   #readout { position: fixed; top: 6px; left: 6px; background: rgba(0,0,0,0.7); padding: 6px 10px; }
-  canvas { display: block; margin: 0 auto; }
+  canvas { display: block; cursor: crosshair; }
 </style>
 </head>
 <body>
-<div id="readout">click the map for coordinates</div>
+<div id="readout">click for coordinates - wheel zooms, drag pans</div>
 <canvas id="cv"></canvas>
-<script src="../hobart-terrain.js"></script>
 <script>
-  const T = HOBART_TERRAIN;
+  // ?region=hobart (default) or ?region=singapore
+  var REGION = new URLSearchParams(location.search).get("region") || "hobart";
+  document.title = REGION + " terrain preview";
+  document.write('<script src="../' + REGION + '-terrain.js"><\/script>');
+</script>
+<script>
+  const T = window[REGION.toUpperCase() + "_TERRAIN"];
+  if (!T) document.getElementById("readout").textContent = "failed to load ../" + REGION + "-terrain.js";
   const cv = document.getElementById("cv");
-  const scale = Math.min((innerWidth - 20) / T.meta.widthM, (innerHeight - 20) / T.meta.heightM);
-  cv.width = Math.ceil(T.meta.widthM * scale);
-  cv.height = Math.ceil(T.meta.heightM * scale);
+  cv.width = innerWidth;
+  cv.height = innerHeight;
   const ctx = cv.getContext("2d");
+
+  /* view transform: screen = world * scale + (ox, oy) */
+  let scale = Math.min((innerWidth - 20) / T.meta.widthM, (innerHeight - 20) / T.meta.heightM);
+  let ox = (innerWidth - T.meta.widthM * scale) / 2;
+  let oy = (innerHeight - T.meta.heightM * scale) / 2;
 
   function drawPolys(list, fill, stroke) {
     for (const poly of list) {
       ctx.beginPath();
-      ctx.moveTo(poly.pts[0][0] * scale, poly.pts[0][1] * scale);
-      for (let i = 1; i < poly.pts.length; i++) ctx.lineTo(poly.pts[i][0] * scale, poly.pts[i][1] * scale);
+      ctx.moveTo(poly.pts[0][0], poly.pts[0][1]);
+      for (let i = 1; i < poly.pts.length; i++) ctx.lineTo(poly.pts[i][0], poly.pts[i][1]);
       ctx.closePath();
       if (fill) { ctx.fillStyle = fill; ctx.fill(); }
-      if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); }
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1 / scale; ctx.stroke(); }
     }
   }
 
-  ctx.fillStyle = "#0042C2";
-  ctx.fillRect(0, 0, cv.width, cv.height);
-  drawPolys(T.land, "#C3F1D5");
-  drawPolys(T.vegetation || [], "#9BDFB4");
-  drawPolys(T.water, "#0042C2");
-  for (const r of T.roads || []) {
-    ctx.beginPath();
-    ctx.moveTo(r.pts[0][0] * scale, r.pts[0][1] * scale);
-    for (let i = 1; i < r.pts.length; i++) ctx.lineTo(r.pts[i][0] * scale, r.pts[i][1] * scale);
-    ctx.strokeStyle = "#B9C6BD";
-    ctx.lineWidth = Math.max(0.5, r.w * scale);
-    ctx.stroke();
+  function redraw() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = "#0042C2";
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.setTransform(scale, 0, 0, scale, ox, oy);
+    drawPolys(T.land, "#C3F1D5");
+    drawPolys(T.vegetation || [], "#9BDFB4");
+    drawPolys(T.water, "#0042C2");
+    for (const r of T.roads || []) {
+      ctx.beginPath();
+      ctx.moveTo(r.pts[0][0], r.pts[0][1]);
+      for (let i = 1; i < r.pts.length; i++) ctx.lineTo(r.pts[i][0], r.pts[i][1]);
+      ctx.strokeStyle = "#B9C6BD";
+      ctx.lineWidth = Math.max(0.5 / scale, r.w);
+      ctx.stroke();
+    }
+    drawPolys(T.buildings || [], "#DCD3C4", "#B3A896");
+    drawPolys(T.piers, "#9FCEB2", "#5f8f74");
+    drawPolys(T.bridgeDeck, "rgba(90,90,90,0.75)");
+    if (T.bridgeCenterline.length) {
+      ctx.beginPath();
+      ctx.moveTo(T.bridgeCenterline[0][0], T.bridgeCenterline[0][1]);
+      for (const [x, y] of T.bridgeCenterline) ctx.lineTo(x, y);
+      ctx.strokeStyle = "#ff0"; ctx.lineWidth = 1 / scale; ctx.stroke();
+    }
+    /* source rectangles of a multi-rect region: seam inspection */
+    for (const r of T.meta.rects || []) {
+      ctx.strokeStyle = "rgba(255,0,255,0.6)";
+      ctx.lineWidth = 2 / scale;
+      ctx.strokeRect(r[0], r[1], r[2] - r[0], r[3] - r[1]);
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
-  ctx.lineWidth = 1;
-  drawPolys(T.buildings || [], "#DCD3C4", "#B3A896");
-  drawPolys(T.piers, "#9FCEB2", "#5f8f74");
-  drawPolys(T.bridgeDeck, "rgba(90,90,90,0.75)");
-  if (T.bridgeCenterline.length) {
-    ctx.beginPath();
-    ctx.moveTo(T.bridgeCenterline[0][0] * scale, T.bridgeCenterline[0][1] * scale);
-    for (const [x, y] of T.bridgeCenterline) ctx.lineTo(x * scale, y * scale);
-    ctx.strokeStyle = "#ff0"; ctx.stroke();
-  }
+  redraw();
+
+  cv.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const k = e.deltaY < 0 ? 1.25 : 0.8;
+    ox = e.offsetX - (e.offsetX - ox) * k;
+    oy = e.offsetY - (e.offsetY - oy) * k;
+    scale *= k;
+    redraw();
+  }, { passive: false });
+
+  let dragging = false, dragged = false, lastX = 0, lastY = 0;
+  cv.addEventListener("mousedown", (e) => { dragging = true; dragged = false; lastX = e.offsetX; lastY = e.offsetY; });
+  cv.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    if (Math.abs(e.offsetX - lastX) + Math.abs(e.offsetY - lastY) > 2) dragged = true;
+    ox += e.offsetX - lastX; oy += e.offsetY - lastY;
+    lastX = e.offsetX; lastY = e.offsetY;
+    redraw();
+  });
+  window.addEventListener("mouseup", () => { dragging = false; });
 
   cv.addEventListener("click", (e) => {
-    const x = e.offsetX / scale, y = e.offsetY / scale;
+    if (dragged) return; // that was a pan, not a pick
+    const x = (e.offsetX - ox) / scale, y = (e.offsetY - oy) / scale;
     const lat = T.meta.origin.lat - y / T.meta.mPerDegLat;
     const lon = T.meta.origin.lon + x / T.meta.mPerDegLon;
     let hit = "";
@@ -68,7 +110,7 @@
         if (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) hit = p.name;
       }
     }
-    const msg = `x=${x.toFixed(1)} y=${y.toFixed(1)}  lat=${lat.toFixed(5)} lon=${lon.toFixed(5)}  ${hit}`;
+    const msg = `x=${x.toFixed(1)} y=${y.toFixed(1)}  lat=${lat.toFixed(6)} lon=${lon.toFixed(6)}  ${hit}`;
     document.getElementById("readout").textContent = msg;
     console.log(msg);
   });

@@ -22,6 +22,7 @@
     <canvas id="myCanvas" width="960" height="640"></canvas>
 
     <script src="hobart-terrain.js"></script>
+    <script src="singapore-terrain.js"></script>
     <script>
         const canvas = document.getElementById("myCanvas");
         const ctx = canvas.getContext("2d");
@@ -37,6 +38,9 @@
 
         if (typeof HOBART_TERRAIN !== "object") {
           throw new Error("hobart-terrain.js not loaded - run tools/build_terrain.py");
+        }
+        if (typeof SINGAPORE_TERRAIN !== "object") {
+          throw new Error("singapore-terrain.js not loaded - run tools/build_terrain.py singapore");
         }
 
         /* ================= tuning constants =================
@@ -90,6 +94,62 @@
           return { name: "pylon-" + i, pts: pts, bbox: bboxOf(pts) };
         });
 
+        /* ================= terrain registry =================
+           Each level names its map via level.terrain; obstacles are that
+           terrain's hand-placed collidable extras (the Tasman Bridge pylons
+           exist only in Hobart). resetLevel points these at the right set. */
+        const TERRAINS = { hobart: HOBART_TERRAIN, singapore: SINGAPORE_TERRAIN };
+        const OBSTACLES = { hobart: PYLONS, singapore: [] };
+        var terrain = HOBART_TERRAIN;
+        var obstacles = PYLONS;
+
+        /* Singapore levels are authored in lat/lon (easy to cross-check
+           against OSM and the terrain preview) and converted to world
+           meters here. Hobart levels stay in meters as originally tuned. */
+        function sgPt(ll) {
+          var m = SINGAPORE_TERRAIN.meta;
+          return [(ll[1] - m.origin.lon) * m.mPerDegLon, (m.origin.lat - ll[0]) * m.mPerDegLat];
+        }
+        function sgStart(lat, lon, hdg) {
+          var p = sgPt([lat, lon]);
+          return { x: p[0], y: p[1], hdg: hdg };
+        }
+        function sgBerth(lat, lon, hdg, len, wid) {
+          var p = sgPt([lat, lon]);
+          return { cx: p[0], cy: p[1], hdg: hdg, len: len, wid: wid };
+        }
+        function sgArea(latN, lonW, latS, lonE) {
+          var a = sgPt([latN, lonW]), b = sgPt([latS, lonE]);
+          return [a[0], a[1], b[0], b[1]];
+        }
+        function sgPath(lls) { return lls.map(sgPt); }
+
+        /* Commercial traffic routes: fairway waypoints ending at a working
+           berth. These vessels hold their track and will not give way -
+           their remaining route shows as a dashed line when they are near. */
+        const SG_ROUTE_SERANGOON = sgPath([   // coaster: east entrance -> Serangoon Hbr -> Pasir Gudang
+          [1.3430, 104.0680], [1.3660, 104.0400], [1.3720, 104.0300],
+          [1.3790, 104.0200], [1.3940, 104.0020], [1.3980, 103.9900],
+          [1.3995, 103.9800], [1.3930, 103.9680], [1.3905, 103.9580],
+          [1.3935, 103.9480], [1.4020, 103.9400], [1.4120, 103.9300],
+          [1.4150, 103.9210], [1.4240, 103.9120], [1.4290, 103.9250],
+          [1.4300, 103.9330], [1.4326, 103.9346]]);
+        const SG_ROUTE_LANGSAT = sgPath([     // LNG: Changi entrance -> Calder Hbr -> Tanjung Langsat
+          [1.3350, 104.0800], [1.3450, 104.0700], [1.3620, 104.0450],
+          [1.3760, 104.0250], [1.3940, 104.0080], [1.4110, 104.0090],
+          [1.4200, 104.0050], [1.4280, 104.0040], [1.4355, 104.0185]]);
+        const SG_ROUTE_PGUDANG = sgPath([     // cargo: Changi entrance -> north of Ubin -> Pasir Gudang
+          [1.3300, 104.0900], [1.3420, 104.0700], [1.3520, 104.0580],
+          [1.3620, 104.0400], [1.3740, 104.0260], [1.3940, 104.0080],
+          [1.4110, 104.0090], [1.4230, 104.0020], [1.4265, 103.9900],
+          [1.4235, 103.9650], [1.4245, 103.9500], [1.4295, 103.9400],
+          [1.4310, 103.9370], [1.4326, 103.9346]]);
+        const SG_ROUTE_PGUDANG_OUT = SG_ROUTE_PGUDANG.slice().reverse();
+        const SG_ROUTE_SENOKO = sgPath([      // LNG: mid-strait -> round the Sembawang pier -> Senoko jetty
+          [1.4330, 103.8880], [1.4420, 103.8700], [1.4530, 103.8600],
+          [1.4640, 103.8450], [1.4745, 103.8285], [1.4750, 103.8150],
+          [1.4700, 103.8030], [1.4685, 103.8005]]);
+
         /* ================= levels =================
            Berth rects sit 20 m off the real OSM quay faces (Macquarie Wharf and
            the Selfs Point fuel pier). hdg in compass degrees along the quay. */
@@ -130,6 +190,43 @@
             berth: { cx: 2937.5, cy: 1305.2, hdg: 352.5, len: 185, wid: 30 },
             wind: { speed: 9, from: 270, gust: false },
             current: { speed: 0.5, to: 173 } },
+          { name: "Level 7 - Singapore: Serangoon Harbour",
+            brief: "Half a world away: a refit at Sembawang. Thread up Serangoon Harbour past Pulau Ubin and hold station in the Punggol anchorage. Commercial traffic will NOT give way - stay clear of the dashed tracks.",
+            terrain: "singapore",
+            start: sgStart(1.3525647, 104.0532788, 305),
+            berth: sgBerth(1.4300, 103.9050, 310, 250, 60),
+            wind: { speed: 2, from: 140, gust: false },
+            current: { speed: 0, to: 0 },
+            traffic: {
+              boats: { count: 7, area: sgArea(1.4450, 103.8950, 1.3450, 104.0650) },
+              vessels: [
+                { kind: "cargo", path: SG_ROUTE_SERANGOON, dockHold: 90, startFrac: 0.45 },
+                { kind: "lng", path: SG_ROUTE_LANGSAT, dockHold: 120, startFrac: 0.2 },
+                { kind: "cargo", path: SG_ROUTE_PGUDANG, dockHold: 90, startFrac: 0.6 },
+              ] } },
+          { name: "Level 8 - Singapore: the Johor Strait",
+            brief: "Weigh anchor and run west along the strait to Sembawang. Come alongside the shipyard wharf, dead slow. Watch for the LNG carrier working across to Senoko.",
+            terrain: "singapore",
+            start: sgStart(1.4300, 103.9050, 285),
+            berth: sgBerth(1.4647000, 103.8240800, 29, 170, 22),
+            wind: { speed: 2, from: 135, gust: false },
+            current: { speed: 0, to: 0 },
+            traffic: {
+              boats: { count: 7, area: sgArea(1.4700, 103.7900, 1.4200, 103.9200) },
+              vessels: [
+                { kind: "lng", path: SG_ROUTE_SENOKO, dockHold: 150, startFrac: 0.1 },
+                { kind: "cargo", path: SG_ROUTE_PGUDANG_OUT, dockHold: 60, startFrac: 0.05 },
+                { kind: "cargo", path: SG_ROUTE_SERANGOON, dockHold: 90, startFrac: 0.7 },
+              ] } },
+          { name: "Level 9 - King George VI graving dock",
+            brief: "160 m of ship, 45 m of dock. Ease her off the wharf, line up the entrance, and put her on the blocks. No pressure.",
+            terrain: "singapore",
+            start: sgStart(1.4647000, 103.8240800, 29),
+            berth: sgBerth(1.4624029, 103.8231973, 29.4, 240, 14),
+            wind: { speed: 1, from: 90, gust: false },
+            current: { speed: 0, to: 0 },
+            traffic: {
+              boats: { count: 2, area: sgArea(1.4680, 103.8150, 1.4560, 103.8320) } } },
         ];
 
         /* ================= game state ================= */
@@ -162,6 +259,24 @@
           [0, 80], [10, 62], [12.8, 40], [12.8, -68], [8, -80],
           [-8, -80], [-12.8, -68], [-12.8, 40], [-10, 62]
         ];
+
+        /* ================= npc traffic =================
+           launch = small boat: wanders the level's water area and actively
+           keeps clear of the player and the big traffic. lng/cargo = working
+           vessels on fixed routes; they hold their track and WILL run the
+           player down. Touching any of them ends the run. */
+        function makeNpcHull(len, beam) {
+          var l2 = len / 2, b2 = beam / 2;
+          return [[0, l2], [b2, l2 - len * 0.18], [b2, -l2 + len * 0.06], [b2 * 0.7, -l2],
+                  [-b2 * 0.7, -l2], [-b2, -l2 + len * 0.06], [-b2, l2 - len * 0.18]];
+        }
+        const NPC_KINDS = {
+          launch: { len: 14, beam: 4.5, speed: 5.0, turn: 0.9 },   // turn in rad/s
+          lng:    { len: 290, beam: 46, speed: 4.0, turn: 0.03 },
+          cargo:  { len: 200, beam: 32, speed: 5.0, turn: 0.05 },
+        };
+        for (var k in NPC_KINDS) NPC_KINDS[k].hull = makeNpcHull(NPC_KINDS[k].len, NPC_KINDS[k].beam);
+        var npcs = [];
 
         var windParticles = [];
         for (var i = 0; i < WIND_PARTICLE_COUNT; i++) windParticles.push([0, 0]);
@@ -242,7 +357,7 @@
         canvas.addEventListener("click", function(e) {
           var wx = (e.offsetX - canvas.width / 2) / PXPM + camX;
           var wy = (e.offsetY - canvas.height / 2) / PXPM + camY;
-          var m = HOBART_TERRAIN.meta;
+          var m = terrain.meta;
           console.log("world x=" + wx.toFixed(1) + " y=" + wy.toFixed(1) +
             "  lat=" + (m.origin.lat - wy / m.mPerDegLat).toFixed(5) +
             " lon=" + (m.origin.lon + wx / m.mPerDegLon).toFixed(5));
@@ -377,12 +492,19 @@
                   ship.y + px * Math.sin(h) - py * Math.cos(h)];
         }
 
-        function shipHullWorld() {
+        /* hull outline (x' stbd, y' fwd) -> world polygon for any vessel */
+        function hullWorld(hull, x, y, hdg) {
+          var c = Math.cos(hdg), s = Math.sin(hdg);
           var pts = [];
-          for (var i = 0; i < SHIP_HULL.length; i++) {
-            pts.push(localToWorld(SHIP_HULL[i][0], SHIP_HULL[i][1]));
+          for (var i = 0; i < hull.length; i++) {
+            var px = hull[i][0], py = hull[i][1];
+            pts.push([x + px * c + py * s, y + px * s - py * c]);
           }
           return pts;
+        }
+
+        function shipHullWorld() {
+          return hullWorld(SHIP_HULL, ship.x, ship.y, ship.heading);
         }
 
         function groundVelocity() {
@@ -512,6 +634,323 @@
           }
         }
 
+        /* ================= npc traffic: water mask =================
+           Small boats steer by a coarse water/land grid rasterized once per
+           level from the collidable polygons, scoped to the level's boat
+           area (the whole world would be hundreds of MB). Outside the area
+           counts as land, which conveniently also fences the boats in. */
+        var waterMask = null, maskX0 = 0, maskY0 = 0, maskW = 0, maskH = 0, maskRes = 4;
+
+        function buildWaterMask(area) {
+          maskX0 = area[0]; maskY0 = area[1];
+          var spanX = area[2] - area[0], spanY = area[3] - area[1];
+          maskRes = Math.max(4, Math.ceil(Math.max(spanX / 1600, spanY / 1200)));
+          maskW = Math.ceil(spanX / maskRes);
+          maskH = Math.ceil(spanY / maskRes);
+          var buf = document.createElement("canvas");
+          buf.width = maskW; buf.height = maskH;
+          var g = buf.getContext("2d", { willReadFrequently: true });
+          g.fillStyle = "#fff";
+          g.fillRect(0, 0, maskW, maskH);
+          g.setTransform(1 / maskRes, 0, 0, 1 / maskRes, -maskX0 / maskRes, -maskY0 / maskRes);
+          g.fillStyle = "#000";
+          var lists = [terrain.land, terrain.piers, obstacles];
+          for (var li = 0; li < lists.length; li++) {
+            for (var i = 0; i < lists[li].length; i++) {
+              drawPolyPath(g, lists[li][i].pts);
+              g.fill();
+            }
+          }
+          var img = g.getImageData(0, 0, maskW, maskH).data;
+          waterMask = new Uint8Array(maskW * maskH);
+          for (var p = 0; p < maskW * maskH; p++) waterMask[p] = img[p * 4] > 127 ? 1 : 0;
+        }
+
+        function isWater(x, y) {
+          if (!waterMask) return false;
+          var cx = Math.floor((x - maskX0) / maskRes), cy = Math.floor((y - maskY0) / maskRes);
+          if (cx < 0 || cy < 0 || cx >= maskW || cy >= maskH) return false;
+          return waterMask[cy * maskW + cx] === 1;
+        }
+
+        function sampleWater(clear) {
+          for (var tries = 0; tries < 200; tries++) {
+            var x = maskX0 + Math.random() * maskW * maskRes;
+            var y = maskY0 + Math.random() * maskH * maskRes;
+            if (!isWater(x, y)) continue;
+            if (clear && !(isWater(x - clear, y) && isWater(x + clear, y) &&
+                           isWater(x, y - clear) && isWater(x, y + clear))) continue;
+            if (distance(x, y, ship.x, ship.y) < 500) continue;
+            return [x, y];
+          }
+          return null;
+        }
+
+        function sampleWaterNear(x, y, rmin, rmax) {
+          for (var tries = 0; tries < 40; tries++) {
+            var a = Math.random() * Math.PI * 2;
+            var r = rmin + Math.random() * (rmax - rmin);
+            var px = x + Math.sin(a) * r, py = y - Math.cos(a) * r;
+            if (isWater(px, py) && isWater(px - 40, py) && isWater(px + 40, py) &&
+                isWater(px, py - 40) && isWater(px, py + 40)) return [px, py];
+          }
+          return null;
+        }
+
+        /* ================= npc traffic: simulation ================= */
+        function angNormRad(a) {
+          while (a > Math.PI) a -= 2 * Math.PI;
+          while (a < -Math.PI) a += 2 * Math.PI;
+          return a;
+        }
+
+        function initTraffic() {
+          npcs = [];
+          waterMask = null;
+          var tr = level.traffic;
+          if (!tr) return;
+          if (tr.boats && tr.boats.count) {
+            buildWaterMask(tr.boats.area);
+            for (var i = 0; i < tr.boats.count; i++) {
+              var p = sampleWater(80);
+              if (!p) break;
+              npcs.push({ kind: "launch", x: p[0], y: p[1], hdg: Math.random() * Math.PI * 2,
+                          spd: 0, tx: p[0], ty: p[1], retarget: 0, blocked: 0 });
+            }
+          }
+          var vs = tr.vessels || [];
+          for (var v = 0; v < vs.length; v++) npcs.push(spawnVessel(vs[v]));
+        }
+
+        function spawnVessel(cfg) {
+          var path = cfg.path;
+          var lens = [], total = 0;
+          for (var i = 1; i < path.length; i++) {
+            var L = distance(path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]);
+            lens.push(L);
+            total += L;
+          }
+          var want = (cfg.startFrac || 0) * total;
+          var seg = 0;
+          while (seg < lens.length - 1 && want > lens[seg]) { want -= lens[seg]; seg++; }
+          var t = lens[seg] > 0 ? Math.min(1, want / lens[seg]) : 0;
+          var x = path[seg][0] + (path[seg + 1][0] - path[seg][0]) * t;
+          var y = path[seg][1] + (path[seg + 1][1] - path[seg][1]) * t;
+          return { kind: cfg.kind, path: path, cfg: cfg, seg: seg + 1, state: "run", holdT: 0,
+                   x: x, y: y, spd: NPC_KINDS[cfg.kind].speed,
+                   hdg: Math.atan2(path[seg + 1][0] - path[seg][0], -(path[seg + 1][1] - path[seg][1])) };
+        }
+
+        function stepVessel(n) {
+          var kind = NPC_KINDS[n.kind];
+          if (n.state === "dock") {
+            n.spd = Math.max(0, n.spd - 0.3 * DT);
+            n.holdT -= DT;
+            if (n.holdT <= 0) {   // slip back to the route start (far offshore)
+              n.seg = 1;
+              n.x = n.path[0][0]; n.y = n.path[0][1];
+              n.hdg = Math.atan2(n.path[1][0] - n.path[0][0], -(n.path[1][1] - n.path[0][1]));
+              n.spd = kind.speed;
+              n.state = "run";
+            }
+            return;
+          }
+          var wp = n.path[n.seg];
+          var d = distance(n.x, n.y, wp[0], wp[1]);
+          var last = n.seg === n.path.length - 1;
+          if (d < 60) {
+            if (last) { n.state = "dock"; n.holdT = n.cfg.dockHold || 60; return; }
+            n.seg++;
+            wp = n.path[n.seg];
+            d = distance(n.x, n.y, wp[0], wp[1]);
+            last = n.seg === n.path.length - 1;
+          }
+          var want = Math.atan2(wp[0] - n.x, -(wp[1] - n.y));
+          var maxTurn = kind.turn * DT;
+          n.hdg += Math.max(-maxTurn, Math.min(maxTurn, angNormRad(want - n.hdg)));
+          var target = last ? Math.min(kind.speed, Math.max(0.6, d / 80)) : kind.speed;
+          n.spd += Math.max(-0.5 * DT, Math.min(0.5 * DT, target - n.spd));
+          n.x += Math.sin(n.hdg) * n.spd * DT;
+          n.y -= Math.cos(n.hdg) * n.spd * DT;
+        }
+
+        function fleeFrom(n, px, py, range, gain, v) {
+          var dx = n.x - px, dy = n.y - py;
+          var d = Math.hypot(dx, dy);
+          if (d > range || d < 1) return v;
+          var w = gain * NPC_KINDS.launch.speed * (1 - d / range);
+          return [v[0] + dx / d * w, v[1] + dy / d * w];
+        }
+
+        function clearAhead(x, y, hdg) {
+          var sx = Math.sin(hdg), sy = -Math.cos(hdg);
+          return isWater(x + sx * 25, y + sy * 25) && isWater(x + sx * 50, y + sy * 50) &&
+                 isWater(x + sx * 75, y + sy * 75);
+        }
+
+        function stepBoat(n) {
+          var kind = NPC_KINDS.launch;
+          n.retarget -= DT;
+          if (n.retarget <= 0 || distance(n.x, n.y, n.tx, n.ty) < 30) {
+            var p = sampleWaterNear(n.x, n.y, 200, 800);
+            if (p) { n.tx = p[0]; n.ty = p[1]; }
+            n.retarget = 60;
+          }
+          /* desired velocity: wander target, plus keep clear of the player
+             and of the working traffic */
+          var d = distance(n.x, n.y, n.tx, n.ty) || 1;
+          var v = [(n.tx - n.x) / d * kind.speed, (n.ty - n.y) / d * kind.speed];
+          v = fleeFrom(n, ship.x, ship.y, 400, 1.6, v);
+          for (var i = 0; i < npcs.length; i++) {
+            if (npcs[i].path) v = fleeFrom(n, npcs[i].x, npcs[i].y, 500, 1.2, v);
+          }
+          var want = Math.atan2(v[0], -v[1]);
+          /* whiskers: take the first heading with open water ahead */
+          var offsets = [0, -0.5, 0.5, -1.0, 1.0];
+          var pick = null;
+          for (var o = 0; o < offsets.length; o++) {
+            if (clearAhead(n.x, n.y, want + offsets[o])) { pick = want + offsets[o]; break; }
+          }
+          var targetSpd = Math.min(Math.hypot(v[0], v[1]), kind.speed * 1.4);
+          if (pick === null) {
+            pick = n.hdg + 2 * kind.turn * DT;   // boxed in: slow hard turn
+            targetSpd = 0.5;
+            n.blocked += DT;
+          } else {
+            n.blocked = 0;
+          }
+          var maxTurn = kind.turn * DT;
+          n.hdg += Math.max(-maxTurn, Math.min(maxTurn, angNormRad(pick - n.hdg)));
+          n.spd += Math.max(-1.0 * DT, Math.min(1.0 * DT, targetSpd - n.spd));
+          n.x += Math.sin(n.hdg) * n.spd * DT;
+          n.y -= Math.cos(n.hdg) * n.spd * DT;
+          if (n.blocked > 4 || !isWater(n.x, n.y)) {   // stuck or beached: quietly restart
+            var p2 = sampleWater(80);
+            if (p2) { n.x = p2[0]; n.y = p2[1]; n.spd = 0; n.blocked = 0; }
+          }
+        }
+
+        function stepNpcs() {
+          for (var i = 0; i < npcs.length; i++) {
+            if (npcs[i].path) stepVessel(npcs[i]);
+            else stepBoat(npcs[i]);
+          }
+        }
+
+        function checkNpcCollision() {
+          var hull = shipHullWorld();
+          var hb = bboxOf(hull);
+          for (var i = 0; i < npcs.length; i++) {
+            var n = npcs[i];
+            var nh = hullWorld(NPC_KINDS[n.kind].hull, n.x, n.y, n.hdg);
+            if (!bboxOverlap(hb, bboxOf(nh))) continue;
+            for (var a = 0; a < hull.length; a++) {
+              var h1 = hull[a], h2 = hull[(a + 1) % hull.length];
+              for (var b = 0; b < nh.length; b++) {
+                if (segSeg(h1, h2, nh[b], nh[(b + 1) % nh.length])) return true;
+              }
+            }
+            if (robustPointInPolygon(nh, [ship.x, ship.y]) <= 0) return true;
+            if (robustPointInPolygon(hull, [n.x, n.y]) <= 0) return true;
+          }
+          return false;
+        }
+
+        /* ================= npc traffic: rendering ================= */
+        function traceNpcHull(pts) {   // local (x' stbd, y' fwd) under translate+rotate(hdg)
+          ctx.beginPath();
+          ctx.moveTo(pts[0][0], -pts[0][1]);
+          for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], -pts[i][1]);
+          ctx.closePath();
+        }
+
+        function drawNpcRoute(n) {
+          ctx.strokeStyle = n.kind === "lng" ? "rgba(255,170,60,0.6)" : "rgba(255,255,255,0.5)";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([12, 8]);
+          ctx.beginPath();
+          ctx.moveTo(n.x, n.y);
+          for (var s = n.seg; s < n.path.length; s++) ctx.lineTo(n.path[s][0], n.path[s][1]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          var end = n.path[n.path.length - 1];
+          ctx.beginPath();
+          ctx.arc(end[0], end[1], 10, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        const CONTAINER_COLORS = ["#B34747", "#3E7BB0", "#4F9E60", "#C29A3B", "#7A6FA8"];
+
+        function drawLaunch(kind) {
+          traceNpcHull(kind.hull);
+          ctx.fillStyle = "#F2F4F5";
+          ctx.fill();
+          ctx.strokeStyle = "#8A969B";
+          ctx.lineWidth = 0.5;
+          ctx.stroke();
+          ctx.fillStyle = "#5E6A70";
+          ctx.fillRect(-1.6, -1, 3.2, 4);   // wheelhouse just aft of midships
+        }
+
+        function drawLng(kind, seed) {
+          traceNpcHull(kind.hull);
+          ctx.fillStyle = "#8C2B2B";
+          ctx.fill();
+          ctx.strokeStyle = "#5D1C1C";
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          ctx.fillStyle = "#E8E4DA";   // four spherical tank domes
+          var r = kind.beam * 0.36;
+          for (var i = 0; i < 4; i++) {
+            ctx.beginPath();
+            ctx.arc(0, -kind.len * 0.32 + i * kind.len * 0.185, r, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.fillStyle = "#F5F5F0";   // aft accommodation block
+          ctx.fillRect(-kind.beam * 0.28, kind.len * 0.36, kind.beam * 0.56, kind.len * 0.08);
+        }
+
+        function drawCargo(kind, seed) {
+          traceNpcHull(kind.hull);
+          ctx.fillStyle = "#4A5B66";
+          ctx.fill();
+          ctx.strokeStyle = "#2E3A42";
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          var rows = 3, cols = 9;   // container stacks, colors stable per ship
+          var cw = kind.len * 0.62 / cols, ch = kind.beam * 0.6 / rows;
+          for (var c = 0; c < cols; c++) {
+            for (var rw = 0; rw < rows; rw++) {
+              ctx.fillStyle = CONTAINER_COLORS[(seed * 31 + c * 7 + rw * 13) % CONTAINER_COLORS.length];
+              ctx.fillRect(-kind.beam * 0.3 + rw * ch + 0.5,
+                           -kind.len * 0.4 + c * cw + 0.5, ch - 1, cw - 1);
+            }
+          }
+          ctx.fillStyle = "#F5F5F0";
+          ctx.fillRect(-kind.beam * 0.28, kind.len * 0.34, kind.beam * 0.56, kind.len * 0.09);
+        }
+
+        function drawNpcs(vb) {
+          for (var i = 0; i < npcs.length; i++) {   // routes go under the hulls
+            var n = npcs[i];
+            if (n.path && n.state === "run" &&
+                distance(n.x, n.y, ship.x, ship.y) < 1800) drawNpcRoute(n);
+          }
+          for (var i = 0; i < npcs.length; i++) {
+            var n = npcs[i];
+            var kind = NPC_KINDS[n.kind];
+            if (n.x + kind.len < vb.minx || n.x - kind.len > vb.maxx ||
+                n.y + kind.len < vb.miny || n.y - kind.len > vb.maxy) continue;
+            ctx.save();
+            ctx.translate(n.x, n.y);
+            ctx.rotate(n.hdg);
+            if (n.kind === "launch") drawLaunch(kind);
+            else if (n.kind === "lng") drawLng(kind, i);
+            else drawCargo(kind, i);
+            ctx.restore();
+          }
+        }
+
         /* ================= wind particles (world space) ================= */
         function viewBounds(margin) {
           var hw = canvas.width / 2 / PXPM + margin;
@@ -621,7 +1060,7 @@
         }
 
         function drawRoads(g, vb) {
-          var roads = HOBART_TERRAIN.roads || [];
+          var roads = terrain.roads || [];
           g.strokeStyle = "#B9C6BD";
           g.lineCap = "round";
           g.lineJoin = "round";
@@ -669,12 +1108,12 @@
             g.clearRect(0, 0, wpx, hpx);
           }
           g.setTransform(res, 0, 0, res, -x0 * res, -y0 * res);
-          drawPolyList(g, HOBART_TERRAIN.land, box, "#C3F1D5");
-          drawPolyList(g, HOBART_TERRAIN.vegetation || [], box, "#9BDFB4");
-          drawPolyList(g, HOBART_TERRAIN.water, box, "#0042C2");
+          drawPolyList(g, terrain.land, box, "#C3F1D5");
+          drawPolyList(g, terrain.vegetation || [], box, "#9BDFB4");
+          drawPolyList(g, terrain.water, box, "#0042C2");
           drawRoads(g, box);
-          drawPolyList(g, HOBART_TERRAIN.buildings || [], box, "#DCD3C4", "#B3A896");
-          drawPolyList(g, HOBART_TERRAIN.piers, box, "#9FCEB2", "#6B9C80");
+          drawPolyList(g, terrain.buildings || [], box, "#DCD3C4", "#B3A896");
+          drawPolyList(g, terrain.piers, box, "#9FCEB2", "#6B9C80");
           terrainBox = box;
         }
 
@@ -704,13 +1143,13 @@
           ctx.restore();
         }
 
-        function drawPylons(vb) {
-          drawPolyList(ctx, PYLONS, vb, "#3D3D3D", "#222222");
+        function drawObstacles(vb) {
+          drawPolyList(ctx, obstacles, vb, "#3D3D3D", "#222222");
         }
 
         function drawBridgeDeck(vb) {
           ctx.globalAlpha = 0.5;
-          drawPolyList(ctx, HOBART_TERRAIN.bridgeDeck, vb, "#6E6E6E", "#4A4A4A");
+          drawPolyList(ctx, terrain.bridgeDeck || [], vb, "#6E6E6E", "#4A4A4A");
           ctx.globalAlpha = 1;
         }
 
@@ -960,8 +1399,9 @@
           var vb = viewBounds(100);
           drawTerrain(vb);
           drawBerthZone();
-          drawPylons(vb);
+          drawObstacles(vb);
           drawWake();
+          drawNpcs(vb);
           drawShip();
           if (debugOverlay) drawDebugWorld();
           drawWindParticles();
@@ -1155,7 +1595,7 @@
 
           ctx.fillStyle = "#FFFFFF";
           drawCenteredText("Parking Mania: Nuyina", 150, "70px Impact");
-          drawCenteredText("Berth the icebreaker RSV Nuyina in the Port of Hobart.", 200, "22px Impact");
+          drawCenteredText("Berth the icebreaker RSV Nuyina: Hobart, then a Singapore refit.", 200, "22px Impact");
 
           var textY = 270;
           var lineSpacing = 32;
@@ -1169,7 +1609,7 @@
           drawCenteredText("HIT SPACE TO START", 560, "28px Impact");
           ctx.font = "12px Arial";
           ctx.fillStyle = "#FFE0CC";
-          ctx.fillText("1-6: jump to a level", 10, canvas.height - 8);
+          ctx.fillText("1-9: jump to a level", 10, canvas.height - 8);
           drawCredit();
         }
 
@@ -1241,7 +1681,7 @@
           drawPanel(240);
           ctx.fillStyle = "#FFFFFF";
           drawCenteredText("VOYAGE COMPLETE", canvas.height / 2 - 52, "52px Impact");
-          drawCenteredText("The Nuyina is fuelled, stored and ready for Antarctica.", canvas.height / 2 + 4, "22px Impact");
+          drawCenteredText("Refitted at Sembawang and ready for Antarctica.", canvas.height / 2 + 4, "22px Impact");
           drawCenteredText("Well done, Captain.", canvas.height / 2 + 36, "22px Impact");
           drawCenteredText("HIT SPACE FOR THE TITLE SCREEN", canvas.height / 2 + 88, "26px Impact");
           drawCredit();
@@ -1255,6 +1695,8 @@
 
         function resetLevel() {
           level = LEVELS[levelIndex];
+          terrain = TERRAINS[level.terrain || "hobart"];
+          obstacles = OBSTACLES[level.terrain || "hobart"];
           ship.x = level.start.x;
           ship.y = level.start.y;
           ship.heading = level.start.hdg * Math.PI / 180;
@@ -1267,7 +1709,8 @@
           berthConditionsMet = false;
           wake = [];
           wakeCounter = 0;
-          collidables = HOBART_TERRAIN.land.concat(HOBART_TERRAIN.piers, PYLONS);
+          collidables = terrain.land.concat(terrain.piers, obstacles);
+          initTraffic();
           camX = ship.x;
           camY = ship.y;
           bakeTerrain();  // bake the new shore now rather than hitching on frame one
@@ -1285,7 +1728,8 @@
           }
           if (gameState == "playing") {
             stepShip();
-            if (checkCollision()) {
+            stepNpcs();
+            if (checkCollision() || checkNpcCollision()) {
               gameState = "crashed";
             } else {
               checkBerth();
@@ -1343,6 +1787,89 @@
             div.textContent = JSON.stringify(result);
             document.body.appendChild(div);
           }, 3000);
+        }
+
+        /* Dev aid: open as #play3 / #play9 etc to jump straight into a level
+           (used for headless screenshots; harmless in normal play). */
+        var playHash = /^#play([1-9])$/.exec(location.hash);
+        if (playHash && parseInt(playHash[1], 10) <= LEVELS.length) {
+          startLevel(parseInt(playHash[1], 10) - 1);
+          gameState = "playing";
+        }
+
+        /* Singapore self-check: parking-mania-nuyina.html#test-sg drives off
+           the Changi start, then verifies traffic (a route vessel underway, a
+           small boat that flees the player) and the terrain (open water vs
+           Punggol shore, and the carved graving dock accepting the ship). */
+        if (location.hash == "#test-sg") {
+          startLevel(6);
+          gameState = "playing";
+          wPressed = true;
+          var sgT0 = null, sgMoved = -1, sgU = -1;
+          var vIdx = -1, vPos = null, bIdx = -1;
+          setTimeout(function() { sgT0 = { x: ship.x, y: ship.y }; }, 500);
+          setTimeout(function() {
+            sgMoved = sgT0 ? distance(sgT0.x, sgT0.y, ship.x, ship.y) : -1;
+            sgU = ship.u;
+            for (var i = 0; i < npcs.length; i++) {
+              if (npcs[i].path && vIdx < 0) vIdx = i;
+              if (!npcs[i].path && bIdx < 0) bIdx = i;
+            }
+            if (vIdx >= 0) vPos = { x: npcs[vIdx].x, y: npcs[vIdx].y };
+            /* park in open water east of the anchorage (NOT in the berth
+               zone, which would end the level and freeze the traffic) and
+               drop a boat alongside: it should clear off within seconds */
+            wPressed = false;
+            var anch = sgPt([1.4295, 103.9100]);
+            ship.x = anch[0]; ship.y = anch[1];
+            ship.u = 0; ship.v = 0; ship.r = 0; ship.throttle = 0;
+            if (bIdx >= 0) { npcs[bIdx].x = ship.x + 60; npcs[bIdx].y = ship.y; }
+          }, 3000);
+          setTimeout(function() {
+            var result = { moved: Math.round(sgMoved * 100) / 100,
+                           u: Math.round(sgU * 100) / 100,
+                           npcs: npcs.length };
+            result.vesselMoved = vIdx >= 0 && vPos ?
+              Math.round(distance(vPos.x, vPos.y, npcs[vIdx].x, npcs[vIdx].y)) : -1;
+            result.boatFled = bIdx >= 0 ?
+              Math.round(distance(ship.x, ship.y, npcs[bIdx].x, npcs[bIdx].y) - 60) : -1;
+            /* teleport checks against the Singapore map */
+            var clearPt = sgPt([1.3600, 104.0430]);
+            ship.heading = 305 * Math.PI / 180;
+            ship.u = 0; ship.v = 0; ship.r = 0;
+            ship.x = clearPt[0]; ship.y = clearPt[1];
+            result.hitClear = checkCollision();
+            var punggol = sgPt([1.3980, 103.9080]);
+            ship.x = punggol[0]; ship.y = punggol[1];
+            result.hitPunggol = checkCollision();
+            /* the carve regression: sit her in the graving dock */
+            startLevel(8);
+            ship.heading = level.berth.hdg * Math.PI / 180;
+            ship.u = 0; ship.v = 0; ship.r = 0;
+            ship.x = level.berth.cx; ship.y = level.berth.cy;
+            result.hitDock = checkCollision();
+            checkBerth();
+            result.dockBerthOK = berthConditionsMet;
+            result.land = SINGAPORE_TERRAIN.land.length;
+            result.buildings = (SINGAPORE_TERRAIN.buildings || []).length;
+            result.roads = (SINGAPORE_TERRAIN.roads || []).length;
+            /* frame-budget sanity on the big map (ms per call) */
+            var tc = performance.now();
+            for (var pi = 0; pi < 50; pi++) { checkCollision(); checkNpcCollision(); }
+            result.collideMs = Math.round((performance.now() - tc) * 2) / 100;
+            tc = performance.now();
+            bakeTerrain();
+            result.bakeMs = Math.round((performance.now() - tc) * 100) / 100;
+            result.pass = result.moved > 0.1 && result.u > 0.05 &&
+              result.npcs >= 5 && result.vesselMoved > 20 && result.boatFled > 10 &&
+              !result.hitClear && result.hitPunggol && !result.hitDock &&
+              result.dockBerthOK && result.land > 0 && result.buildings > 0 &&
+              result.roads > 0;
+            var div = document.createElement("div");
+            div.id = "test-result";
+            div.textContent = JSON.stringify(result);
+            document.body.appendChild(div);
+          }, 7000);
         }
     </script>
 </body>

@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""build_terrain.py - one-off terrain converter for Parking Mania Nuyina.
+"""build_terrain.py - OSM terrain converter for Parking Mania Nuyina.
 
-Fetches OSM data for the Hobart bounding box from the Overpass API,
-stitches the coastline into closed land polygons, projects everything
-to a local metric grid (y-down, origin at the NW bbox corner), simplifies
-with Douglas-Peucker, and writes ../hobart-terrain.js as a classic script
-defining the global HOBART_TERRAIN (works over file://).
+Fetches OSM data for a configured region (one or more lat/lon rectangles)
+from the Overpass API, stitches the coastline into closed land polygons,
+projects everything to a local metric grid (y-down, origin at the NW corner
+of the region's bounding box), simplifies with Douglas-Peucker, and writes
+../<region>-terrain.js as a classic script defining a global (works over
+file://).
 
-Usage:  python build_terrain.py [--refresh]
-  --refresh   ignore overpass-cache.json and re-fetch from the API
+Multi-rectangle regions: each rectangle is fetched and processed by the
+single-rectangle pipeline (clip + close against that rectangle), then the
+results are translated into region coordinates and concatenated. Land
+polygons from overlapping rectangles simply overlap - the game fills land
+without strokes and collides against any polygon, so no boolean union is
+needed. Decorations are deduplicated by OSM id.
+
+Usage:  python build_terrain.py [region] [--refresh]
+  region      hobart (default) or singapore
+  --refresh   ignore the per-rectangle caches and re-fetch from the API
 
 Python 3 stdlib only. Data (c) OpenStreetMap contributors, ODbL.
 """
@@ -17,20 +26,16 @@ import json
 import math
 import os
 import sys
+import time
+import urllib.parse
 import urllib.request
 from datetime import date
 
-# ---------------- configuration ----------------
+# ---------------- shared configuration ----------------
 
-BBOX = {"south": -42.947382, "west": 147.294690, "north": -42.832922, "east": 147.430067}
-ORIGIN = {"lat": BBOX["north"], "lon": BBOX["west"]}
-M_PER_DEG_LAT = 110574.0
-M_PER_DEG_LON = 111320.0 * math.cos(math.radians(ORIGIN["lat"]))
 DP_TOLERANCE = 1.5          # m, Douglas-Peucker
 WATER_MAX_AREA = 0.5e6      # m^2, keep only small water polys (docks)
 BRIDGE_MIN_DIAG = 300.0     # m, ignore small road bridges
-AROUND_M = 600              # m, decoration layers only this close to the coastline
-BUILDING_MIN_AREA = 60.0    # m^2, drop garden sheds / garages
 ROAD_WIDTHS = {             # rendered stroke width in meters, by highway class
     "motorway": 16, "trunk": 14, "primary": 12, "secondary": 10, "tertiary": 9,
     "motorway_link": 8, "trunk_link": 8, "primary_link": 7, "secondary_link": 7,
@@ -42,8 +47,6 @@ GREEN_TAGS = {
     "natural": {"wood", "scrub", "grassland", "heath"},
 }
 HERE = os.path.dirname(os.path.abspath(__file__))
-CACHE_FILE = os.path.join(HERE, "overpass-cache.json")
-OUT_FILE = os.path.join(HERE, "..", "hobart-terrain.js")
 ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
@@ -51,8 +54,142 @@ ENDPOINTS = [
 ]
 # overpass-api.de returns Apache 406 for the default Python-urllib agent
 USER_AGENT = "parking-mania-nuyina-terrain-builder/1.0 (hobby game)"
+FETCH_TRIES = 2             # attempts per endpoint; Overpass 504s are transient
+FETCH_BACKOFF = 15          # s between attempts on the same endpoint
 
-QUERY = f"""[out:json][timeout:240][bbox:{BBOX['south']},{BBOX['west']},{BBOX['north']},{BBOX['east']}];
+# The King George VI graving dock at Sembawang (OSM way 252392151) is mapped
+# as natural=water on top of the land polygon, but the game's water layer is
+# visual only, so the basin must be carved out of the collidable land. The
+# path runs from the west mouth corner down the west wall, around the head,
+# and back up the east wall; the walls sit ~4 m outside the OSM water edge
+# (clear width ~45 m for a 25.6 m beam) and the mouth ends are extended ~8 m
+# seaward so they splice cleanly across the coastline at the dock mouth.
+KGVI_CARVE = {
+    "name": "King George VI graving dock",
+    "path": [
+        (1.4638531, 103.8237751),   # W mouth corner, seaward of the coastline
+        (1.4611827, 103.8222823),   # SW corner (head)
+        (1.4609841, 103.8226370),   # SE corner (head)
+        (1.4636545, 103.8241298),   # E mouth corner, seaward of the coastline
+    ],
+    "probe_inside": (1.4624029, 103.8231973),  # dock centroid
+    "max_snap": 30.0,   # m, path endpoints must be this close to a land ring
+}
+
+REGIONS = {
+    "hobart": {
+        "rects": [{"south": -42.947382, "west": 147.294690,
+                   "north": -42.832922, "east": 147.430067}],
+        "cache_files": ["overpass-cache.json"],
+        "out_file": "../hobart-terrain.js",
+        "global_name": "HOBART_TERRAIN",
+        # Hand patches for broken OSM data (chains ending mid-bbox), way id -> node list.
+        "fixups": {},
+        "carves": [],
+        "coast_joins": [],
+        "join_eps": 0.0,            # m, 0 disables coordinate-joining of open chains
+        "centerline_fallback": True,  # no bridge outline -> buffer the centerline (Tasman Bridge)
+        "around_m": 600,            # decoration layers only this close to the coastline
+        "building_min_area": 60.0,  # m^2, drop garden sheds / garages
+        "probes": [("water", -42.880, 147.360, "mid-Derwent"),
+                   ("land", -42.882, 147.325, "Hobart CBD")],
+    },
+    "singapore": {
+        # Union of four overlapping rectangles forming the corridor from the
+        # Johor Strait at Sembawang, past Punggol/Seletar, through Serangoon
+        # Harbour and Pulau Ubin, out to Changi Bay.
+        "rects": [
+            {"south": 1.4222030060838888, "west": 103.77831029103474,
+             "north": 1.487257912327686, "east": 103.90410839369433},
+            {"south": 1.394027, "west": 103.888527,
+             "north": 1.452211, "east": 103.946499},
+            {"south": 1.3624150112632847, "west": 103.9258767356537,
+             "north": 1.4382378390320683, "east": 104.12385407754422},
+            {"south": 1.312017845643442, "west": 103.99255660427656,
+             "north": 1.3866969080192064, "east": 104.1444767173245},
+        ],
+        "cache_files": ["overpass-cache-sg-0.json", "overpass-cache-sg-1.json",
+                        "overpass-cache-sg-2.json", "overpass-cache-sg-3.json"],
+        "out_file": "../singapore-terrain.js",
+        "global_name": "SINGAPORE_TERRAIN",
+        "fixups": {},
+        "carves": [KGVI_CARVE],
+        # OSM's coastline stops on either side of the reservoir dams; each
+        # pair bridges (chain end) -> (chain start) with a straight segment
+        # along the dam crest. Points are the printed break diagnostics.
+        "coast_joins": [
+            ((1.4254574, 103.8886735), (1.4257500, 103.8881975)),   # Punggol Barat channel dam
+            ((1.4266361, 103.8691816), (1.4248110, 103.8672220)),   # Lower Seletar dam
+            ((1.4179026, 103.9340319), (1.4178389, 103.9341981)),   # Coney Island west gap
+            ((1.4149793, 103.9381315), (1.4149261, 103.9390356)),   # Serangoon East dam
+            ((1.4175970, 103.8998362), (1.4183101, 103.8979293)),   # Sungei Punggol mouth dam
+            ((1.3887320, 103.9727962), (1.3874870, 103.9728687)),   # Pasir Ris river mouth
+            ((1.3815227, 104.0295767), (1.3808240, 104.0303110)),   # Changi Creek
+            # Pulau Ubin's ring arrives in eleven pieces; these close it up
+            ((1.4060531, 103.9506150), (1.4059252, 103.9507253)),
+            ((1.4062569, 103.9525920), (1.4060936, 103.9531001)),
+            ((1.4021696, 103.9569824), (1.4020768, 103.9570061)),
+            ((1.4016514, 103.9574371), (1.4007873, 103.9577518)),   # Ubin town jetty
+            ((1.4001256, 103.9623206), (1.4002443, 103.9626240)),
+            ((1.4054596, 103.9739733), (1.4059045, 103.9739875)),
+            ((1.4059845, 103.9743862), (1.4059972, 103.9744170)),
+            ((1.4071904, 103.9764358), (1.4071424, 103.9764870)),
+            ((1.4178923, 103.9750963), (1.4178511, 103.9747226)),
+            ((1.4178388, 103.9742937), (1.4179728, 103.9742267)),
+            ((1.4165755, 103.9592690), (1.4165605, 103.9590472)),
+            ((1.3595258, 104.0552502), (1.3581053, 104.0569639)),   # Changi Bay reclamation
+        ],
+        "join_eps": 0.5,
+        "centerline_fallback": False,  # coastal viaducts are not harbour bridges
+        "around_m": 400,            # Singapore's coastal strip is dense; keep it tight
+        "building_min_area": 120.0,
+        "probes": [("water", 1.3525647, 104.0532788, "Changi anchorage (L7 start)"),
+                   ("land", 1.410, 103.965, "Pulau Ubin"),
+                   ("land", 1.398, 103.908, "Punggol"),
+                   ("land", 1.480, 103.860, "Johor shore"),
+                   ("water", 1.4624029, 103.8231973, "KGVI dock (carved)")],
+    },
+}
+
+# ---------------- projection ----------------
+# proj/unproj and the clippers work against one axis-aligned rectangle at a
+# time (NW corner origin, y down). set_world() points them at a rectangle;
+# the longitude scale is fixed once per region so that overlapping rectangles
+# land on exactly the same region grid.
+
+M_PER_DEG_LAT = 110574.0
+M_PER_DEG_LON = None
+ORIGIN = None
+WORLD_W = 0.0
+WORLD_H = 0.0
+PERIM = 0.0
+
+
+def set_lon_scale(origin_lat):
+    global M_PER_DEG_LON
+    M_PER_DEG_LON = 111320.0 * math.cos(math.radians(origin_lat))
+
+
+def set_world(rect):
+    global ORIGIN, WORLD_W, WORLD_H, PERIM
+    ORIGIN = {"lat": rect["north"], "lon": rect["west"]}
+    WORLD_W = (rect["east"] - rect["west"]) * M_PER_DEG_LON
+    WORLD_H = (rect["north"] - rect["south"]) * M_PER_DEG_LAT
+    PERIM = 2 * (WORLD_W + WORLD_H)
+
+
+def proj(lat, lon):
+    return ((lon - ORIGIN["lon"]) * M_PER_DEG_LON, (ORIGIN["lat"] - lat) * M_PER_DEG_LAT)
+
+
+def unproj(x, y):
+    return (ORIGIN["lat"] - y / M_PER_DEG_LAT, ORIGIN["lon"] + x / M_PER_DEG_LON)
+
+# ---------------- fetch ----------------
+
+
+def make_query(rect, around_m):
+    return f"""[out:json][timeout:240][bbox:{rect['south']},{rect['west']},{rect['north']},{rect['east']}];
 way["natural"="coastline"]->.coast;
 (
   .coast;
@@ -65,58 +202,42 @@ way["natural"="coastline"]->.coast;
   way["highway"]["bridge"];
   node["man_made"="bridge_support"];
   way["man_made"="bridge_support"];
-  way["building"](around.coast:{AROUND_M});
-  way["man_made"="storage_tank"](around.coast:{AROUND_M});
-  way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link)$"](around.coast:{AROUND_M});
-  way["landuse"~"^(grass|forest|meadow|recreation_ground|village_green|cemetery)$"](around.coast:{AROUND_M});
-  way["leisure"~"^(park|garden|pitch|golf_course|playground)$"](around.coast:{AROUND_M});
-  way["natural"~"^(wood|scrub|grassland|heath)$"](around.coast:{AROUND_M});
+  way["building"](around.coast:{around_m});
+  way["man_made"="storage_tank"](around.coast:{around_m});
+  way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link)$"](around.coast:{around_m});
+  way["landuse"~"^(grass|forest|meadow|recreation_ground|village_green|cemetery)$"](around.coast:{around_m});
+  way["leisure"~"^(park|garden|pitch|golf_course|playground)$"](around.coast:{around_m});
+  way["natural"~"^(wood|scrub|grassland|heath)$"](around.coast:{around_m});
 );
 out body;
 >;
 out skel qt;"""
 
-# Hand patches for broken OSM data (chains ending mid-bbox). Keyed by way id.
-FIXUPS = {}
 
-# ---------------- projection ----------------
-
-
-def proj(lat, lon):
-    return ((lon - ORIGIN["lon"]) * M_PER_DEG_LON, (ORIGIN["lat"] - lat) * M_PER_DEG_LAT)
-
-
-def unproj(x, y):
-    return (ORIGIN["lat"] - y / M_PER_DEG_LAT, ORIGIN["lon"] + x / M_PER_DEG_LON)
-
-
-WORLD_W = proj(BBOX["north"], BBOX["east"])[0]
-WORLD_H = proj(BBOX["south"], BBOX["west"])[1]
-
-# ---------------- fetch ----------------
-
-
-def fetch_osm(refresh):
-    if not refresh and os.path.exists(CACHE_FILE):
-        print("Using cached Overpass response:", CACHE_FILE)
-        with open(CACHE_FILE, encoding="utf8") as f:
+def fetch_osm(query, cache_file, refresh):
+    if not refresh and os.path.exists(cache_file):
+        print("Using cached Overpass response:", cache_file)
+        with open(cache_file, encoding="utf8") as f:
             return json.load(f)
-    body = ("data=" + urllib.parse.quote(QUERY)).encode()
+    body = ("data=" + urllib.parse.quote(query)).encode()
     for url in ENDPOINTS:
-        try:
-            print("Fetching from", url, "...")
-            req = urllib.request.Request(
-                url, data=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded",
-                         "User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=240) as res:
-                data = json.load(res)
-            with open(CACHE_FILE, "w", encoding="utf8") as f:
-                json.dump(data, f)
-            print("  OK,", len(data["elements"]), "elements, cached to", CACHE_FILE)
-            return data
-        except Exception as err:  # noqa: BLE001 - report and try mirror
-            print("  fetch failed:", err)
+        for attempt in range(1, FETCH_TRIES + 1):
+            try:
+                print(f"Fetching from {url} (attempt {attempt}) ...")
+                req = urllib.request.Request(
+                    url, data=body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded",
+                             "User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=240) as res:
+                    data = json.load(res)
+                with open(cache_file, "w", encoding="utf8") as f:
+                    json.dump(data, f)
+                print("  OK,", len(data["elements"]), "elements, cached to", cache_file)
+                return data
+            except Exception as err:  # noqa: BLE001 - report and try again / next mirror
+                print("  fetch failed:", err)
+                if attempt < FETCH_TRIES:
+                    time.sleep(FETCH_BACKOFF)
     raise RuntimeError("All Overpass endpoints failed")
 
 # ---------------- geometry helpers ----------------
@@ -231,6 +352,75 @@ def stitch_chains(way_list, allow_reverse=True):
         chains.append({"nodes": nodes, "ids": ids, "closed": nodes[0] == nodes[-1]})
     return chains
 
+
+def coord_join(chain_objs, eps):
+    """Join open coastline chains whose endpoints coincide within eps meters.
+
+    Fixes the most common OSM breakage (duplicated nodes at way junctions)
+    without hand fixups. Orientation is never reversed (land-on-left). Chains
+    whose own ends meet within eps are marked closed.
+    """
+    if eps <= 0:
+        return chain_objs
+    out = [c for c in chain_objs if c["closed"]]
+    open_chains = [c for c in chain_objs if not c["closed"]]
+    changed = True
+    while changed:
+        changed = False
+        for i, ci in enumerate(open_chains):
+            if ci is None:
+                continue
+            for j, cj in enumerate(open_chains):
+                if i == j or cj is None:
+                    continue
+                gap = math.dist(ci["pts"][-1], cj["pts"][0])
+                if gap <= eps:
+                    print(f"  joined coastline chains near {unproj(*ci['pts'][-1])}"
+                          f" (gap {gap:.2f} m)")
+                    ci["pts"] = ci["pts"] + cj["pts"]
+                    open_chains[j] = None
+                    changed = True
+                    break
+            if changed:
+                break
+    for c in open_chains:
+        if c is None:
+            continue
+        if len(c["pts"]) >= 4 and math.dist(c["pts"][0], c["pts"][-1]) <= eps:
+            print(f"  closed coastline chain near {unproj(*c['pts'][0])}")
+            c["closed"] = True
+        out.append(c)
+    return out
+
+def apply_coast_joins(chain_objs, region, tol=20.0):
+    """Bridge hand-listed coastline gaps: each pair (A, B) joins the open
+    chain ending near A to the open chain starting near B with a straight
+    segment (a reservoir dam crest, say). If only one side exists in this
+    rectangle (the gap straddles its boundary), the chain is extended to the
+    far point instead so it clips cleanly at the rectangle edge."""
+    for a_ll, b_ll in region["coast_joins"]:
+        a, b = proj(*a_ll), proj(*b_ll)
+        opens = [c for c in chain_objs if not c["closed"]]
+        end_c = min(opens, key=lambda c: math.dist(c["pts"][-1], a), default=None)
+        if end_c is not None and math.dist(end_c["pts"][-1], a) > tol:
+            end_c = None
+        start_c = min(opens, key=lambda c: math.dist(c["pts"][0], b), default=None)
+        if start_c is not None and math.dist(start_c["pts"][0], b) > tol:
+            start_c = None
+        if end_c and start_c and end_c is start_c:
+            print(f"  coast join: closed a ring across {a_ll} -> {b_ll}")
+            end_c["closed"] = True
+        elif end_c and start_c:
+            print(f"  coast join: bridged {a_ll} -> {b_ll}")
+            end_c["pts"] = end_c["pts"] + start_c["pts"]
+            chain_objs.remove(start_c)
+        elif end_c:
+            print(f"  coast join: extended chain end to {b_ll}")
+            end_c["pts"] = end_c["pts"] + [b]
+        elif start_c:
+            print(f"  coast join: extended chain start to {a_ll}")
+            start_c["pts"] = [a] + start_c["pts"]
+
 # ---------------- bbox clipping (Liang-Barsky per segment) ----------------
 
 EDGE_EPS = 0.01  # m, snap-to-boundary tolerance
@@ -343,8 +533,6 @@ def clip_poly_rect(pts):
 # E edge S->N (keeps land on the left, matching OSM coastline direction).
 # Corners: NW t=W, SW t=W+H, SE t=2W+H, NE t=2W+2H (=0).
 
-PERIM = 2 * (WORLD_W + WORLD_H)
-
 
 def peri_t(p):
     x, y = p
@@ -426,13 +614,98 @@ def buffer_polyline(pts, width):
         right.append((pts[i][0] - nx * hw, pts[i][1] - ny * hw))
     return left + list(reversed(right))
 
-# ---------------- main ----------------
+# ---------------- carve-splice (dock basins cut into collidable land) ----------------
 
 
-def main():
-    refresh = "--refresh" in sys.argv
-    osm = fetch_osm(refresh)
+def nearest_on_ring(ring, p):
+    """Nearest point on a closed ring's boundary -> (dist, arc position, point)."""
+    best = (math.inf, 0.0, ring[0])
+    s = 0.0
+    n = len(ring)
+    for i in range(n):
+        a, b = ring[i], ring[(i + 1) % n]
+        seg = math.dist(a, b)
+        if seg > 0:
+            t = ((p[0] - a[0]) * (b[0] - a[0]) + (p[1] - a[1]) * (b[1] - a[1])) / (seg * seg)
+            t = max(0.0, min(1.0, t))
+            q = (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+            d = math.dist(p, q)
+            if d < best[0]:
+                best = (d, s + t * seg, q)
+        s += seg
+    return best
 
+
+def ring_length(ring):
+    return sum(math.dist(ring[i], ring[(i + 1) % len(ring)]) for i in range(len(ring)))
+
+
+def apply_carve(land, carve):
+    """Splice a hand-authored detour into every land ring near its endpoints.
+
+    The carve path enters land at its first point and leaves at its last; the
+    short boundary arc between the two nearest-point projections (the bit of
+    waterfront crossing the dock mouth) is replaced with the detour, notching
+    the basin out of the polygon. Ring traversal order is preserved, so the
+    winding (land-on-left) survives without any signed-area fixups.
+    """
+    path_m = [proj(lat, lon) for lat, lon in carve["path"]]
+    probe = proj(*carve["probe_inside"])
+    expected = poly_area(path_m)
+    a_pt, b_pt = path_m[0], path_m[-1]
+    carved = 0
+    for idx, ring in enumerate(land):
+        dA, sA, pA = nearest_on_ring(ring, a_pt)
+        dB, sB, pB = nearest_on_ring(ring, b_pt)
+        if dA > carve["max_snap"] or dB > carve["max_snap"]:
+            continue
+        for mid in path_m[1:-1]:
+            if not point_in_poly(ring, mid):
+                raise RuntimeError(f"carve {carve['name']}: interior point not inside land")
+        if not point_in_poly(ring, probe):
+            raise RuntimeError(f"carve {carve['name']}: probe not inside land pre-splice")
+        L = ring_length(ring)
+        if (sB - sA) % L <= (sA - sB) % L:
+            s1, p1, s2, p2, ins = sA, pA, sB, pB, list(path_m)
+        else:
+            s1, p1, s2, p2, ins = sB, pB, sA, pA, list(reversed(path_m))
+        # collect original vertices on the long arc, in ring order from s2 to s1
+        span = (s1 - s2) % L
+        keep = []
+        s = 0.0
+        for i in range(len(ring)):
+            d = (s - s2) % L
+            if EDGE_EPS < d < span - EDGE_EPS:
+                keep.append((d, ring[i]))
+            s += math.dist(ring[i], ring[(i + 1) % len(ring)])
+        keep.sort(key=lambda kv: kv[0])
+        new_ring = [p1] + ins + [p2] + [p for _, p in keep]
+        new_ring = [p for i, p in enumerate(new_ring)
+                    if i == 0 or math.dist(p, new_ring[i - 1]) > 0.01]
+        removed = poly_area(ring) - poly_area(new_ring)
+        if not (0.3 * expected <= removed <= 2.5 * expected):
+            raise RuntimeError(f"carve {carve['name']}: removed {removed:.0f} m^2, "
+                               f"expected ~{expected:.0f} m^2")
+        if point_in_poly(new_ring, probe):
+            raise RuntimeError(f"carve {carve['name']}: probe still inside land post-splice")
+        land[idx] = new_ring
+        carved += 1
+        print(f"  carved {carve['name']} out of land ring {idx} "
+              f"({removed:.0f} m^2, snap {dA:.1f}/{dB:.1f} m)")
+    if carved == 0:
+        raise RuntimeError(f"carve {carve['name']}: no land ring within "
+                           f"{carve['max_snap']} m of the carve mouth")
+
+# ---------------- per-rectangle pipeline ----------------
+
+
+def process_rect(osm, region):
+    """Run the single-rectangle pipeline; set_world(rect) must be active.
+
+    Returns raw (unsimplified, rect-local) layers. Non-land items carry _id
+    (OSM id) and _full (entirely inside this rectangle) for cross-rectangle
+    deduplication.
+    """
     nodes = {}      # id -> (x, y) projected
     node_tags = {}
     ways = {}       # id -> {'id', 'nodes', 'tags'}
@@ -454,24 +727,32 @@ def main():
         return [w for w in ways.values()
                 if (w["tags"].get(k) == v if v else k in w["tags"])]
 
+    def all_inside(pts):
+        return all(-EDGE_EPS <= x <= WORLD_W + EDGE_EPS and -EDGE_EPS <= y <= WORLD_H + EDGE_EPS
+                   for x, y in pts)
+
     stats = {}
 
     # ---- coastline -> land polygons ----
-    coast_ways = [{"id": w["id"], "nodes": FIXUPS.get(w["id"], w["nodes"])}
+    fixups = region["fixups"]
+    coast_ways = [{"id": w["id"], "nodes": fixups.get(w["id"], w["nodes"])}
                   for w in by_tag("natural", "coastline")]
     stats["coastline ways"] = len(coast_ways)
     chains = stitch_chains(coast_ways, allow_reverse=False)
-    stats["coastline chains"] = len(chains)
+    chain_objs = [{"pts": [nodes[i] for i in c["nodes"] if i in nodes], "closed": c["closed"]}
+                  for c in chains]
+    chain_objs = [c for c in chain_objs if len(c["pts"]) >= 2]
+    chain_objs = coord_join(chain_objs, region["join_eps"])
+    apply_coast_joins(chain_objs, region)
+    stats["coastline chains"] = len(chain_objs)
 
     land = []
     open_fragments = []
-    for chain in chains:
-        pts = [nodes[i] for i in chain["nodes"] if i in nodes]
-        if chain["closed"]:
+    for chain in chain_objs:
+        pts = chain["pts"]
+        if chain["closed"] and math.dist(pts[0], pts[-1]) < 1e-9:
             pts = pts[:-1]
-        inside = all(-EDGE_EPS <= x <= WORLD_W + EDGE_EPS and -EDGE_EPS <= y <= WORLD_H + EDGE_EPS
-                     for x, y in pts)
-        if chain["closed"] and inside:
+        if chain["closed"] and all_inside(pts):
             land.append(pts)  # island / ring fully inside
             continue
         closed_pts = pts + [pts[0]] if chain["closed"] else pts
@@ -502,21 +783,21 @@ def main():
             print("  buffered open", w["tags"]["man_made"], w["id"],
                   w["tags"].get("name", ""), "width", width or 8.0)
         piers.append({"name": w["tags"].get("name") or f"{w['tags']['man_made']}-{w['id']}",
-                      "pts": pts})
+                      "pts": pts, "_id": w["id"], "_full": True})
 
     # ---- small water polygons (docks) ----
     water = []
 
-    def add_water_ring(pts, name):
+    def add_water_ring(pts, name, wid):
         if len(pts) >= 3 and poly_area(pts) <= WATER_MAX_AREA:
-            water.append({"name": name, "pts": pts})
+            water.append({"name": name, "pts": pts, "_id": wid, "_full": True})
 
     for w in by_tag("natural", "water"):
         if w["tags"].get("water") == "river":
             continue
         if w["nodes"][0] != w["nodes"][-1]:
             continue
-        add_water_ring(way_pts(w)[:-1], w["tags"].get("name") or f"water-{w['id']}")
+        add_water_ring(way_pts(w)[:-1], w["tags"].get("name") or f"water-{w['id']}", w["id"])
     for rel in rels:
         tags = rel.get("tags", {})
         if tags.get("natural") != "water" or tags.get("water") == "river":
@@ -528,7 +809,7 @@ def main():
                 print("  skipped unstitchable water relation", rel["id"], tags.get("name", ""))
                 continue
             add_water_ring([nodes[i] for i in ring["nodes"][:-1] if i in nodes],
-                           tags.get("name") or f"water-rel-{rel['id']}")
+                           tags.get("name") or f"water-rel-{rel['id']}", f"rel-{rel['id']}")
     stats["water polygons kept"] = len(water)
 
     # ---- bridge deck, centerline, supports ----
@@ -540,7 +821,8 @@ def main():
         bb = poly_bbox(pts)
         if math.hypot(bb[2] - bb[0], bb[3] - bb[1]) < BRIDGE_MIN_DIAG:
             continue
-        bridge_deck.append({"name": w["tags"].get("name") or f"bridge-{w['id']}", "pts": pts})
+        bridge_deck.append({"name": w["tags"].get("name") or f"bridge-{w['id']}", "pts": pts,
+                            "_id": w["id"], "_full": True})
     stats["bridge deck polygons"] = len(bridge_deck)
 
     hwy_bridge_ways = [w for w in ways.values() if "highway" in w["tags"] and "bridge" in w["tags"]]
@@ -552,20 +834,23 @@ def main():
         if length > best_len:
             best_len, bridge_centerline = length, pts
     stats["bridge centerline length m"] = round(best_len)
-    if not bridge_deck and len(bridge_centerline) >= 2:
+    if region["centerline_fallback"] and not bridge_deck and len(bridge_centerline) >= 2:
         print("  no man_made=bridge outline; buffering centerline +/-9 m")
         bridge_deck.append({"name": "bridge-buffered",
-                            "pts": buffer_polyline(bridge_centerline, 18.0)})
+                            "pts": buffer_polyline(bridge_centerline, 18.0),
+                            "_id": "bridge-buffered", "_full": False})
 
     bridge_supports = []
     for w in by_tag("man_made", "bridge_support"):
         pts = way_pts(w)
         if w["nodes"][0] == w["nodes"][-1]:
             pts = pts[:-1]
-        bridge_supports.append({"name": f"support-{w['id']}", "pts": pts})
+        bridge_supports.append({"name": f"support-{w['id']}", "pts": pts,
+                                "_id": w["id"], "_full": True})
     for nid, tags in node_tags.items():
         if tags.get("man_made") == "bridge_support":
-            bridge_supports.append({"name": f"support-node-{nid}", "pts": [nodes[nid]]})
+            bridge_supports.append({"name": f"support-node-{nid}", "pts": [nodes[nid]],
+                                    "_id": f"node-{nid}", "_full": True})
     stats["bridge supports"] = len(bridge_supports)
 
     # ---- decoration layers (visual only, not collidable) ----
@@ -576,9 +861,11 @@ def main():
             continue
         if w["nodes"][0] != w["nodes"][-1]:
             continue
-        pts = clip_poly_rect(way_pts(w)[:-1])
-        if len(pts) >= 3 and poly_area(pts) >= BUILDING_MIN_AREA:
-            buildings.append({"name": t.get("name") or f"bldg-{w['id']}", "pts": pts})
+        raw = way_pts(w)[:-1]
+        pts = clip_poly_rect(raw)
+        if len(pts) >= 3 and poly_area(pts) >= region["building_min_area"]:
+            buildings.append({"name": t.get("name") or f"bldg-{w['id']}", "pts": pts,
+                              "_id": w["id"], "_full": all_inside(raw)})
     stats["buildings kept"] = len(buildings)
 
     vegetation = []
@@ -588,9 +875,11 @@ def main():
             continue
         if "building" in t or w["nodes"][0] != w["nodes"][-1]:
             continue
-        pts = clip_poly_rect(way_pts(w)[:-1])
+        raw = way_pts(w)[:-1]
+        pts = clip_poly_rect(raw)
         if len(pts) >= 3:
-            vegetation.append({"name": t.get("name") or f"veg-{w['id']}", "pts": pts})
+            vegetation.append({"name": t.get("name") or f"veg-{w['id']}", "pts": pts,
+                               "_id": w["id"], "_full": all_inside(raw)})
     stats["vegetation polygons"] = len(vegetation)
 
     roads = []
@@ -598,12 +887,104 @@ def main():
         t = w["tags"]
         width = ROAD_WIDTHS.get(t.get("highway"))
         if width is None or "bridge" in t or t.get("tunnel"):
-            continue  # the Tasman Bridge deck is its own layer
+            continue  # bridge decks are their own layer
         if t.get("service") in ("parking_aisle", "driveway"):
             continue
-        for frag in clip_chain(way_pts(w)):
-            roads.append({"name": t.get("name") or f"road-{w['id']}", "w": width, "pts": frag})
+        pts = way_pts(w)
+        full = all_inside(pts)
+        for frag in clip_chain(pts):
+            roads.append({"name": t.get("name") or f"road-{w['id']}", "w": width, "pts": frag,
+                          "_id": w["id"], "_full": full})
     stats["road segments"] = len(roads)
+
+    return {"land": land, "piers": piers, "water": water, "bridge_deck": bridge_deck,
+            "bridge_centerline": bridge_centerline, "bridge_supports": bridge_supports,
+            "buildings": buildings, "vegetation": vegetation, "roads": roads}, stats
+
+# ---------------- region assembly ----------------
+
+DEDUPE_LAYERS = ("piers", "water", "bridge_deck", "bridge_supports", "buildings",
+                 "vegetation", "roads")
+
+
+def merge_region(per_rect, offsets):
+    """Translate per-rectangle layers into region coordinates and concatenate.
+
+    Items fully inside some rectangle are emitted once (first rectangle wins);
+    clipped fragments of such items are dropped. Land rings are never deduped:
+    overlapping copies in the rectangle-overlap corridors render and collide
+    correctly as-is.
+    """
+    def shift_pts(pts, off):
+        return [(x + off[0], y + off[1]) for x, y in pts]
+
+    merged = {"land": []}
+    for ri, layers in enumerate(per_rect):
+        for ring in layers["land"]:
+            merged["land"].append(shift_pts(ring, offsets[ri]))
+
+    for key in DEDUPE_LAYERS:
+        full_ids = {it["_id"] for layers in per_rect for it in layers[key] if it["_full"]}
+        emitted = set()
+        out = []
+        for ri, layers in enumerate(per_rect):
+            for it in layers[key]:
+                if it["_full"]:
+                    if it["_id"] in emitted:
+                        continue
+                    emitted.add(it["_id"])
+                elif it["_id"] in full_ids:
+                    continue
+                shifted = dict(it)
+                shifted["pts"] = shift_pts(it["pts"], offsets[ri])
+                del shifted["_id"], shifted["_full"]
+                out.append(shifted)
+        merged[key] = out
+
+    best_len, best_line = 0.0, []
+    for ri, layers in enumerate(per_rect):
+        pts = layers["bridge_centerline"]
+        length = sum(math.dist(pts[i - 1], pts[i]) for i in range(1, len(pts)))
+        if length > best_len:
+            best_len, best_line = length, shift_pts(pts, offsets[ri])
+    merged["bridge_centerline"] = best_line
+    merged["bridge_centerline_len"] = round(best_len)
+    return merged
+
+
+def build_region(name, refresh):
+    region = REGIONS[name]
+    rects = region["rects"]
+    union = {"south": min(r["south"] for r in rects),
+             "west": min(r["west"] for r in rects),
+             "north": max(r["north"] for r in rects),
+             "east": max(r["east"] for r in rects)}
+    set_lon_scale(union["north"])
+
+    per_rect = []
+    offsets = []
+    stats = {}
+    for i, rect in enumerate(rects):
+        if len(rects) > 1:
+            print(f"--- rectangle {i + 1}/{len(rects)} ---")
+        cache_file = os.path.join(HERE, region["cache_files"][i])
+        osm = fetch_osm(make_query(rect, region["around_m"]), cache_file, refresh)
+        set_world(rect)
+        layers, rect_stats = process_rect(osm, region)
+        per_rect.append(layers)
+        offsets.append(((rect["west"] - union["west"]) * M_PER_DEG_LON,
+                        (union["north"] - rect["north"]) * M_PER_DEG_LAT))
+        for k, v in rect_stats.items():
+            stats[k] = stats.get(k, 0) + v
+
+    set_world(union)  # region frame for carves, probes, meta
+    merged = merge_region(per_rect, offsets)
+    stats["bridge centerline length m"] = merged["bridge_centerline_len"]
+    if len(rects) > 1:
+        stats["land polygons"] = len(merged["land"])
+
+    for carve in region["carves"]:
+        apply_carve(merged["land"], carve)
 
     # ---- simplify + finalize ----
     counts = {"raw": 0, "simplified": 0}
@@ -622,26 +1003,33 @@ def main():
 
     out = {
         "meta": {
-            "bbox": BBOX,
-            "origin": ORIGIN,
+            "bbox": union,
+            "origin": {"lat": union["north"], "lon": union["west"]},
             "mPerDegLat": M_PER_DEG_LAT,
             "mPerDegLon": round(M_PER_DEG_LON, 1),
             "widthM": round(WORLD_W, 1),
             "heightM": round(WORLD_H, 1),
         },
-        "land": finalize([{"name": f"land-{i}", "pts": pts} for i, pts in enumerate(land)], True),
-        "piers": finalize(piers, True),
-        "water": finalize(water, True),
-        "vegetation": finalize(vegetation, True, 2.0),
-        "buildings": finalize(buildings, True, 0.5),
-        "bridgeDeck": finalize(bridge_deck, True),
+        "land": finalize([{"name": f"land-{i}", "pts": pts}
+                          for i, pts in enumerate(merged["land"])], True),
+        "piers": finalize(merged["piers"], True),
+        "water": finalize(merged["water"], True),
+        "vegetation": finalize(merged["vegetation"], True, 2.0),
+        "buildings": finalize(merged["buildings"], True, 0.5),
+        "bridgeDeck": finalize(merged["bridge_deck"], True),
         "bridgeSupports": [{"name": s["name"],
                             "pts": [[round(x, 1), round(y, 1)] for x, y in s["pts"]]}
-                           for s in bridge_supports],
-        "bridgeCenterline": [[round(x, 1), round(y, 1)] for x, y in bridge_centerline],
+                           for s in merged["bridge_supports"]],
+        "bridgeCenterline": [[round(x, 1), round(y, 1)] for x, y in merged["bridge_centerline"]],
     }
+    if len(rects) > 1:
+        out["meta"]["rects"] = [
+            [round((r["west"] - union["west"]) * M_PER_DEG_LON, 1),
+             round((union["north"] - r["north"]) * M_PER_DEG_LAT, 1),
+             round((r["east"] - union["west"]) * M_PER_DEG_LON, 1),
+             round((union["north"] - r["south"]) * M_PER_DEG_LAT, 1)] for r in rects]
     road_out = []
-    for r in roads:
+    for r in merged["roads"]:
         counts["raw"] += len(r["pts"])
         pts = [[round(x, 1), round(y, 1)] for x, y in douglas_peucker(r["pts"], 1.0)]
         counts["simplified"] += len(pts)
@@ -656,22 +1044,27 @@ def main():
         p = proj(lat, lon)
         return sum(1 for poly in out["land"] if point_in_poly(poly["pts"], p))
 
-    water_hits = land_hits(-42.880, 147.360)  # mid-Derwent
-    cbd_hits = land_hits(-42.882, 147.325)    # Hobart CBD
-    print("probe mid-Derwent land hits:", water_hits, "(want 0)")
-    print("probe Hobart CBD land hits:", cbd_hits, "(want 1)")
-    if water_hits != 0 or cbd_hits != 1:
-        raise RuntimeError("sanity probes failed - land/water inverted or stitching broken")
+    failed = []
+    for want, lat, lon, label in region["probes"]:
+        hits = land_hits(lat, lon)
+        ok = hits == 0 if want == "water" else hits >= 1
+        print(f"probe {label} land hits: {hits} (want {want})")
+        if not ok:
+            failed.append(label)
+    if failed:
+        raise RuntimeError(f"sanity probes failed ({', '.join(failed)}) - "
+                           "land/water inverted or stitching broken")
 
     # ---- emit ----
     def js(obj):
         return json.dumps(obj, separators=(",", ":"))
 
+    regen = "python tools/build_terrain.py" + ("" if name == "hobart" else " " + name)
     lines = [
         f"// GENERATED by tools/build_terrain.py on {date.today().isoformat()} - do not edit by hand.",
-        "// Regenerate with: python tools/build_terrain.py",
+        f"// Regenerate with: {regen}",
         "// Data (c) OpenStreetMap contributors, ODbL - openstreetmap.org/copyright",
-        "var HOBART_TERRAIN = {",
+        f"var {region['global_name']} = {{",
         f"meta: {js(out['meta'])},",
     ]
     for key in ("land", "piers", "water", "vegetation", "buildings", "roads",
@@ -681,14 +1074,24 @@ def main():
         lines.append("],")
     lines.append(f"bridgeCenterline: {js(out['bridgeCenterline'])}")
     lines.append("};")
-    with open(OUT_FILE, "w", encoding="utf8", newline="\n") as f:
+    out_file = os.path.join(HERE, region["out_file"])
+    with open(out_file, "w", encoding="utf8", newline="\n") as f:
         f.write("\n".join(lines))
 
     print("\n--- stats ---")
     for k, v in stats.items():
         print(f"  {k}: {v}")
-    print("wrote", os.path.normpath(OUT_FILE),
-          f"({os.path.getsize(OUT_FILE) // 1024} KB)")
+    print("wrote", os.path.normpath(out_file),
+          f"({os.path.getsize(out_file) // 1024} KB)")
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    refresh = "--refresh" in sys.argv
+    name = args[0] if args else "hobart"
+    if name not in REGIONS:
+        raise SystemExit(f"unknown region {name!r} - choose from {sorted(REGIONS)}")
+    build_region(name, refresh)
 
 
 if __name__ == "__main__":
