@@ -14,7 +14,7 @@
 <div id="readout">click for coordinates - wheel zooms, drag pans</div>
 <canvas id="cv"></canvas>
 <script>
-  // ?region=hobart (default) or ?region=singapore
+  // ?region=hobart (default), ?region=singapore, or ?region=heard
   var REGION = new URLSearchParams(location.search).get("region") || "hobart";
   document.title = REGION + " terrain preview";
   document.write('<script src="../' + REGION + '-terrain.js"><\/script>');
@@ -44,13 +44,27 @@
   }
 
   function redraw() {
+    const polar = REGION === "heard";
+    const p = polar ? {
+      sea: "#173F55", land: "#72776D", veg: "#7D8965", water: "#315E70",
+      shallow: "#9BCBD2", glacier: "#E3EEF0", glacierEdge: "#B7D0D6"
+    } : {
+      sea: "#0042C2", land: "#C3F1D5", veg: "#9BDFB4", water: "#0042C2",
+      shallow: "#9FD2D8", glacier: "#E6F2F4", glacierEdge: "#BDD6DC"
+    };
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = "#0042C2";
+    ctx.fillStyle = p.sea;
     ctx.fillRect(0, 0, cv.width, cv.height);
     ctx.setTransform(scale, 0, 0, scale, ox, oy);
-    drawPolys(T.land, "#C3F1D5");
-    drawPolys(T.vegetation || [], "#9BDFB4");
-    drawPolys(T.water, "#0042C2");
+    ctx.globalAlpha = 0.14;
+    drawPolys(T.shallows || [], p.shallow);
+    ctx.globalAlpha = 0.13;
+    drawPolys(T.shallowBands || [], p.shallow);
+    ctx.globalAlpha = 1;
+    drawPolys(T.land, p.land);
+    drawPolys(T.vegetation || [], p.veg);
+    drawPolys(T.glaciers || [], p.glacier, p.glacierEdge);
+    drawPolys(T.water, p.water);
     for (const r of T.roads || []) {
       ctx.beginPath();
       ctx.moveTo(r.pts[0][0], r.pts[0][1]);

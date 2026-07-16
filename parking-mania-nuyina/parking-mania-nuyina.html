@@ -15,6 +15,20 @@
             display: block;
             margin: 0 auto;
         }
+
+        #test-result {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 9998;
+            background: #fff;
+            color: #000;
+            font: 16px monospace;
+            padding: 8px;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
     </style>
 </head>
 
@@ -23,6 +37,7 @@
 
     <script src="hobart-terrain.js"></script>
     <script src="singapore-terrain.js"></script>
+    <script src="heard-terrain.js"></script>
     <script>
         const canvas = document.getElementById("myCanvas");
         const ctx = canvas.getContext("2d");
@@ -31,7 +46,7 @@
         window.onerror = function(msg, src, line) {
           var div = document.createElement("div");
           div.className = "game-error";
-          div.style.cssText = "color:#fff;background:#a00;font:14px monospace;padding:6px;";
+          div.style.cssText = "position:fixed;top:0;left:0;z-index:9999;color:#fff;background:#a00;font:14px monospace;padding:6px;";
           div.textContent = "ERROR: " + msg + " (line " + line + ")";
           document.body.appendChild(div);
         };
@@ -41,6 +56,9 @@
         }
         if (typeof SINGAPORE_TERRAIN !== "object") {
           throw new Error("singapore-terrain.js not loaded - run tools/build_terrain.py singapore");
+        }
+        if (typeof HEARD_TERRAIN !== "object") {
+          throw new Error("heard-terrain.js not loaded - run tools/build_terrain.py heard");
         }
 
         /* ================= tuning constants =================
@@ -64,6 +82,7 @@
         const DRAG_V1 = 200, DRAG_V2 = 600;     // sway drag
         const DRAG_R1 = 1.5e6, DRAG_R2 = 2e8;   // yaw drag
         const WIND_K = 2.5;               // kN/(m/s)^2 of wind speed
+        const WIND_CP_AHEAD = 10;          // m: windage centre ahead of yaw pivot
         const HOLD_TIME = 3.0;            // s inside the berth to win
         const BERTH_MAX_SPEED = 0.5;      // m/s over ground
         const BERTH_MAX_YAWRATE = 0.3 * Math.PI / 180; // rad/s
@@ -98,10 +117,27 @@
            Each level names its map via level.terrain; obstacles are that
            terrain's hand-placed collidable extras (the Tasman Bridge pylons
            exist only in Hobart). resetLevel points these at the right set. */
-        const TERRAINS = { hobart: HOBART_TERRAIN, singapore: SINGAPORE_TERRAIN };
-        const OBSTACLES = { hobart: PYLONS, singapore: [] };
+        const TERRAINS = { hobart: HOBART_TERRAIN, singapore: SINGAPORE_TERRAIN,
+                           heard: HEARD_TERRAIN };
+        const OBSTACLES = { hobart: PYLONS, singapore: [], heard: [] };
         var terrain = HOBART_TERRAIN;
         var obstacles = PYLONS;
+
+        const DEFAULT_TERRAIN_PALETTE = {
+          sea: "#0042C2", land: "#C3F1D5", vegetation: "#9BDFB4", inlandWater: "#0042C2",
+          road: "#B9C6BD", building: "#DCD3C4", buildingStroke: "#B3A896",
+          pier: "#9FCEB2", pierStroke: "#6B9C80", glacier: "#E6F2F4",
+          glacierStroke: "#BDD6DC", shallow: "#9FD2D8",
+        };
+        const HEARD_TERRAIN_PALETTE = {
+          sea: "#173F55", land: "#72776D", vegetation: "#7D8965", inlandWater: "#315E70",
+          road: "#858A82", building: "#9B988D", buildingStroke: "#666A65",
+          pier: "#7B8179", pierStroke: "#555A55", glacier: "#E3EEF0",
+          glacierStroke: "#B7D0D6", shallow: "#9BCBD2",
+        };
+        function terrainPalette() {
+          return level && level.terrain === "heard" ? HEARD_TERRAIN_PALETTE : DEFAULT_TERRAIN_PALETTE;
+        }
 
         /* Singapore levels are authored in lat/lon (easy to cross-check
            against OSM and the terrain preview) and converted to world
@@ -127,6 +163,21 @@
           var p = sgPt([lat, lon]);
           return { kind: kind, x: p[0], y: p[1], hdg: hdg };
         }
+
+        function heardPt(ll) {
+          var m = HEARD_TERRAIN.meta;
+          return [(ll[1] - m.origin.lon) * m.mPerDegLon, (m.origin.lat - ll[0]) * m.mPerDegLat];
+        }
+        function heardStart(lat, lon, hdg) {
+          var p = heardPt([lat, lon]);
+          return { x: p[0], y: p[1], hdg: hdg };
+        }
+        function heardBerth(lat, lon, hdg, len, wid) {
+          var p = heardPt([lat, lon]);
+          return { cx: p[0], cy: p[1], hdg: hdg, len: len, wid: wid,
+                   headingTol: 15, oneWayHeading: true };
+        }
+        function knots(v) { return v / 1.944; }
 
         /* Commercial traffic routes: fairway waypoints ending at a working
            berth. These vessels hold their track and will not give way -
@@ -166,6 +217,7 @@
         const MAC_3 = { kind: "cargo", x: 3725.6, y: 5492.9, hdg: 79.6 };
         const MAC_2 = { kind: "cargo", x: 3592.8, y: 5517.3, hdg: 79.6 };
         const MAC_1 = { kind: "cargo", x: 3804.9, y: 4951.8, hdg: 351.4 };
+        const HEARD_TARGET_PT = heardPt([-53.021397, 73.383085]);
         const LEVELS = [
           { name: "Level 1 - Macquarie 5",
             brief: "A calm morning on the Derwent. Bring her alongside Macquarie Wharf No. 5, dead slow.",
@@ -273,6 +325,23 @@
                 sgMoored("cargo", 1.4702934, 103.8299500, 119.8),
                 sgMoored("cargo", 1.4660562, 103.8258936, 29.9),
               ] } },
+          { name: "Level 10 - Heard Island: Atlas Cove",
+            brief: "Make the stormbound approach to Atlas Cove. There is no traffic, but the westerly swell can roll the ship: heed the cyan warning and put the bow within 45 degrees of west.",
+            terrain: "heard",
+            start: heardStart(-52.97273, 73.26765, 125),
+            berth: heardBerth(-53.021397, 73.383085, 270, 220, 80),
+            wind: { speed: knots(60), from: 270, gust: true, gustPeak: knots(72) },
+            current: { speed: knots(5), to: 90 },
+            shelter: {
+              cx: HEARD_TARGET_PT[0], cy: HEARD_TARGET_PT[1],
+              innerRadius: 800, outerRadius: 2500,
+              windSpeed: knots(50), windGustPeak: knots(60), currentSpeed: knots(0.5),
+            },
+            waves: {
+              from: 270, to: 90, cadenceMin: 75, cadenceMax: 105,
+              warningReal: 15, leadDistance: 900, speed: 12,
+              safeAngle: 45, impulse: 0.75, surfaceWidth: 120, passDistance: 900,
+            } },
         ];
 
         /* ================= game state ================= */
@@ -283,8 +352,13 @@
         var simTime = 0;
         var holdTimer = 0;
         var berthConditionsMet = false;
+        var failureReason = "collision";
         var camX = 0, camY = 0;
         var debugOverlay = false; // C key: trajectory + orientation diagnostics
+        var waveFront = null;
+        var wavePlayTime = 0;
+        var nextWaveTime = Infinity;
+        var lastLoopReal = performance.now();
 
         var ship = {
           x: 0, y: 0,
@@ -365,6 +439,7 @@
           else if (e.code == "Space") { handleSpace(); }
           else if (e.code.slice(0, 5) == "Digit") {
             var n = parseInt(e.code.slice(5), 10);
+            if (n === 0 && LEVELS.length >= 10) n = 10;
             if (n >= 1 && n <= LEVELS.length) startLevel(n - 1);
           }
           if (GAME_KEYS.indexOf(e.code) >= 0) e.preventDefault();
@@ -555,15 +630,63 @@
         function groundVelocity() {
           var h = ship.heading;
           var cd = level.current.to * Math.PI / 180;
-          var cs = level.current.speed;
+          var cs = currentSpeedAt(ship.x, ship.y);
           return [ship.u * Math.sin(h) + ship.v * Math.cos(h) + cs * Math.sin(cd),
                   -ship.u * Math.cos(h) + ship.v * Math.sin(h) - cs * Math.cos(cd)];
         }
 
-        function windSpeedNow() {
+        function shelterBlendAt(x, y) {
+          var s = level.shelter;
+          if (!s) return 1;
+          var t = (distance(x, y, s.cx, s.cy) - s.innerRadius) /
+                  (s.outerRadius - s.innerRadius);
+          t = Math.max(0, Math.min(1, t));
+          return t * t * (3 - 2 * t); // smoothstep: no force discontinuity at either edge
+        }
+
+        function currentSpeedAt(x, y) {
+          if (!level.shelter) return level.current.speed;
+          var t = shelterBlendAt(x, y);
+          return level.shelter.currentSpeed + (level.current.speed - level.shelter.currentSpeed) * t;
+        }
+
+        function windBaseAt(x, y) {
+          if (!level.shelter) return level.wind.speed;
+          var t = shelterBlendAt(x, y);
+          return level.shelter.windSpeed + (level.wind.speed - level.shelter.windSpeed) * t;
+        }
+
+        function windPeakAt(x, y) {
           var w = level.wind;
-          if (!w.gust) return w.speed;
-          return w.speed * (1 + 0.25 * Math.sin(simTime * 0.23) + 0.15 * Math.sin(simTime * 0.71));
+          if (w.gustPeak == null) return null;
+          if (!level.shelter) return w.gustPeak;
+          var t = shelterBlendAt(x, y);
+          return level.shelter.windGustPeak + (w.gustPeak - level.shelter.windGustPeak) * t;
+        }
+
+        function windSpeedAt(x, y) {
+          var w = level.wind;
+          var base = windBaseAt(x, y);
+          if (!w.gust) return base;
+          var peak = windPeakAt(x, y);
+          if (peak != null) {
+            var pulse = 0.5 + 0.3 * Math.sin(simTime * 0.23) + 0.2 * Math.sin(simTime * 0.71);
+            pulse = Math.max(0, Math.min(1, pulse));
+            return base + (peak - base) * pulse;
+          }
+          return base * (1 + 0.25 * Math.sin(simTime * 0.23) + 0.15 * Math.sin(simTime * 0.71));
+        }
+
+        function windSpeedNow() { return windSpeedAt(ship.x, ship.y); }
+
+        function windLoadsAt(x, y, heading, speedOverride) {
+          var ws = speedOverride == null ? windSpeedAt(x, y) : speedOverride;
+          var toward = (level.wind.from + 180) * Math.PI / 180;
+          var relative = toward - heading;
+          var force = WIND_K * ws * ws;
+          var fu = force * Math.cos(relative);
+          var fv = force * Math.sin(relative);
+          return { fu: fu, fv: fv, n: WIND_CP_AHEAD * fv };
         }
 
         /* The thruster props keep turning the water over for a few seconds after
@@ -606,12 +729,13 @@
           Fv += podFlow;
           N -= STERN_ARM * podFlow;
 
-          /* wind: force toward (from + 180), projected into the body frame */
-          var ws = windSpeedNow();
-          var d = (level.wind.from + 180) * Math.PI / 180;
-          var Fw = WIND_K * ws * ws;
-          Fu += Fw * Math.cos(d - ship.heading);
-          Fv += Fw * Math.sin(d - ship.heading);
+          /* Wind acts at a modest forward centre of pressure. Head/following
+             wind still produces translation only; the beam component also
+             yaws the bow downwind. */
+          var windLoad = windLoadsAt(ship.x, ship.y, ship.heading);
+          Fu += windLoad.fu;
+          Fv += windLoad.fv;
+          N += windLoad.n;
 
           /* drag */
           Fu -= DRAG_U1 * ship.u + DRAG_U2 * ship.u * Math.abs(ship.u);
@@ -637,12 +761,63 @@
           }
         }
 
+        /* ================= exceptional swell fronts =================
+           Wave cadence is wall-clock play time, while the front itself moves
+           in world metres on the same compressed simulation clock as the ship. */
+        function randomWaveCadence() {
+          var w = level.waves;
+          return w.cadenceMin + Math.random() * (w.cadenceMax - w.cadenceMin);
+        }
+
+        function resetWaves() {
+          waveFront = null;
+          wavePlayTime = 0;
+          nextWaveTime = level.waves ? randomWaveCadence() : Infinity;
+        }
+
+        function applyWorldImpulse(speed, toDeg) {
+          var d = toDeg * Math.PI / 180;
+          var dvx = Math.sin(d) * speed, dvy = -Math.cos(d) * speed;
+          var h = ship.heading;
+          ship.u += dvx * Math.sin(h) - dvy * Math.cos(h);
+          ship.v += dvx * Math.cos(h) + dvy * Math.sin(h);
+        }
+
+        function resolveWaveImpact() {
+          var w = level.waves;
+          var hdg = ((ship.heading * 180 / Math.PI) % 360 + 360) % 360;
+          if (Math.abs(angDiffDeg(hdg, w.from)) <= w.safeAngle) {
+            applyWorldImpulse(w.impulse, w.to);
+          } else {
+            failureReason = "roll";
+            gameState = "crashed";
+          }
+        }
+
+        function stepWaves(realDt) {
+          if (!level.waves) return;
+          wavePlayTime += realDt;
+          var w = level.waves;
+          if (!waveFront && wavePlayTime >= nextWaveTime - w.warningReal) {
+            waveFront = { x: ship.x - w.leadDistance, relative: -w.leadDistance,
+                          impactTime: nextWaveTime, impacted: false };
+          }
+          if (!waveFront) return;
+          waveFront.x += w.speed * DT;
+          var rel = waveFront.x - ship.x;
+          if (!waveFront.impacted && waveFront.relative < 0 && rel >= 0) {
+            resolveWaveImpact();
+            waveFront.impacted = true;
+            nextWaveTime = wavePlayTime + randomWaveCadence();
+          }
+          waveFront.relative = rel;
+          if (waveFront.impacted && rel > (w.passDistance || w.leadDistance)) waveFront = null;
+        }
+
         /* ================= collision ================= */
-        function checkCollision() {
-          var hull = shipHullWorld();
-          var hb = bboxOf(hull);
-          for (var p = 0; p < collidables.length; p++) {
-            var poly = collidables[p];
+        function polygonsHitHull(polygons, hull, hb) {
+          for (var p = 0; p < polygons.length; p++) {
+            var poly = polygons[p];
             if (!bboxOverlap(hb, poly.bbox)) continue;
             var pts = poly.pts;
             for (var i = 0; i < hull.length; i++) {
@@ -651,10 +826,20 @@
                 if (segSeg(h1, h2, pts[j], pts[(j + 1) % pts.length])) return true;
               }
             }
-            if (robustPointInPolygon(pts, [ship.x, ship.y]) <= 0) return true; // ship swallowed
-            if (robustPointInPolygon(hull, pts[0]) <= 0) return true;          // small poly inside hull
+            if (robustPointInPolygon(pts, [ship.x, ship.y]) <= 0) return true;
+            if (robustPointInPolygon(hull, pts[0]) <= 0) return true;
           }
           return false;
+        }
+
+        function checkCollision() {
+          var hull = shipHullWorld();
+          var hb = bboxOf(hull);
+          if (polygonsHitHull(terrain.shallows || [], hull, hb)) {
+            failureReason = "ground";
+            return true;
+          }
+          return polygonsHitHull(collidables, hull, hb);
         }
 
         /* ================= berth logic ================= */
@@ -665,7 +850,8 @@
           var along = dx * Math.sin(bh) - dy * Math.cos(bh);
           var across = dx * Math.cos(bh) + dy * Math.sin(bh);
           var ad = Math.abs(angDiffDeg(ship.heading * 180 / Math.PI, b.hdg));
-          var aligned = ad < HEADING_TOL || ad > 180 - HEADING_TOL;
+          var headingTol = b.headingTol == null ? HEADING_TOL : b.headingTol;
+          var aligned = ad < headingTol || (!b.oneWayHeading && ad > 180 - headingTol);
           var vel = groundVelocity();
           var sog = Math.hypot(vel[0], vel[1]);
           var alongTol = (b.len - SHIP_LEN) / 2 + 15;
@@ -1108,27 +1294,28 @@
         }
 
         function advectCurrentParticles() {
-          var cs = level.current.speed;
-          if (cs <= 0) return;
+          if (level.current.speed <= 0) return;
           var cd = level.current.to * Math.PI / 180;
-          var vx = Math.sin(cd) * cs * CURRENT_VIS_SCALE, vy = -Math.cos(cd) * cs * CURRENT_VIS_SCALE;
           var vb = viewBounds(20);
           var w = vb.maxx - vb.minx, h = vb.maxy - vb.miny;
           for (var i = 0; i < currentParticles.length; i++) {
             var p = currentParticles[i];
+            var cs = currentSpeedAt(p[0], p[1]);
+            var vx = Math.sin(cd) * cs * CURRENT_VIS_SCALE;
+            var vy = -Math.cos(cd) * cs * CURRENT_VIS_SCALE;
             p[0] = vb.minx + ((p[0] + vx * DT - vb.minx) % w + w) % w;
             p[1] = vb.miny + ((p[1] + vy * DT - vb.miny) % h + h) % h;
           }
         }
 
         function advectWindParticles() {
-          var ws = windSpeedNow();
           var d = (level.wind.from + 180) * Math.PI / 180;
-          var vx = Math.sin(d) * ws * 2.5, vy = -Math.cos(d) * ws * 2.5;
           var vb = viewBounds(20);
           var w = vb.maxx - vb.minx, h = vb.maxy - vb.miny;
           for (var i = 0; i < windParticles.length; i++) {
             var p = windParticles[i];
+            var ws = windSpeedAt(p[0], p[1]);
+            var vx = Math.sin(d) * ws * 2.5, vy = -Math.cos(d) * ws * 2.5;
             p[0] += vx * DT;
             p[1] += vy * DT;
             /* wrap within the visible rect so density stays even as the camera moves */
@@ -1165,22 +1352,46 @@
           }
         }
 
+        function drawShallows(g, vb, palette) {
+          var outer = terrain.shallows || [], bands = terrain.shallowBands || [];
+          if (!outer.length) return;
+          g.save();
+          g.fillStyle = palette.shallow;
+          g.globalAlpha = 0.14;
+          for (var i = 0; i < outer.length; i++) {
+            var b = outer[i].bbox;
+            if (b[2] < vb.minx || b[0] > vb.maxx || b[3] < vb.miny || b[1] > vb.maxy) continue;
+            drawPolyPath(g, outer[i].pts);
+            g.fill();
+          }
+          /* Nested 40/30/20/10 m offsets accumulate toward shore, producing
+             a light near-shore band that fades into the dark open water. */
+          g.globalAlpha = 0.13;
+          for (var j = 0; j < bands.length; j++) {
+            var bb = bands[j].bbox;
+            if (bb[2] < vb.minx || bb[0] > vb.maxx || bb[3] < vb.miny || bb[1] > vb.maxy) continue;
+            drawPolyPath(g, bands[j].pts);
+            g.fill();
+          }
+          g.restore();
+        }
+
         /* faint drifting wave crests that make the tidal stream visible: each
            crest lies across the flow and bows downstream; drawn on the open
            water before the land goes on top */
         function drawCurrentLayer() {
-          var cs = level.current.speed;
-          if (cs <= 0) return;
+          if (level.current.speed <= 0) return;
           var cd = level.current.to * Math.PI / 180;
           var fx = Math.sin(cd), fy = -Math.cos(cd);   // unit vector along the flow
           var cx = -fy, cy = fx;                        // across the flow: the crest line
-          var half = 6 + cs * 7;                        // crest half-length, m
-          var bulge = 1.5 + cs * 3;                     // how far the crest bows downstream
           ctx.strokeStyle = "#66B8FF";
           ctx.lineWidth = 1.6;
           ctx.lineCap = "round";
           for (var i = 0; i < currentParticles.length; i++) {
             var p = currentParticles[i];
+            var cs = currentSpeedAt(p[0], p[1]);
+            var half = 6 + cs * 7;                      // crest half-length, m
+            var bulge = 1.5 + cs * 3;                   // how far the crest bows downstream
             var len = half * (0.6 + 0.4 * Math.sin(p[2] * 3.1));
             ctx.globalAlpha = 0.10 + 0.12 * (0.5 + 0.5 * Math.sin(simTime * 0.8 + p[2]));
             ctx.beginPath();
@@ -1192,9 +1403,41 @@
           ctx.globalAlpha = 1;
         }
 
-        function drawRoads(g, vb) {
+        function drawWaveFront(vb) {
+          if (!waveFront || !level.waves) return;
+          var x = waveFront.x, width = level.waves.surfaceWidth || 120;
+          if (x < vb.minx - width || x > vb.maxx + width) return;
+          ctx.save();
+          var back = x - width, front = x;
+          var surface = ctx.createLinearGradient(back, 0, front, 0);
+          surface.addColorStop(0, "rgba(83,190,207,0)");
+          surface.addColorStop(0.22, "rgba(83,190,207,0.18)");
+          surface.addColorStop(0.72, "rgba(137,224,234,0.32)");
+          surface.addColorStop(0.92, "rgba(217,251,255,0.52)");
+          surface.addColorStop(1, "rgba(217,251,255,0.08)");
+          ctx.fillStyle = surface;
+          ctx.fillRect(back, vb.miny - 20, width, vb.maxy - vb.miny + 40);
+
+          /* A rigid north-south leading edge reads as a broad water surface
+             from overhead and avoids implying that the wave snakes sideways. */
+          ctx.strokeStyle = "rgba(226,252,255,0.88)";
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.moveTo(front, vb.miny - 20);
+          ctx.lineTo(front, vb.maxy + 20);
+          ctx.stroke();
+          ctx.strokeStyle = "rgba(190,240,247,0.34)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(x - width * 0.45, vb.miny - 20);
+          ctx.lineTo(x - width * 0.45, vb.maxy + 20);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        function drawRoads(g, vb, color) {
           var roads = terrain.roads || [];
-          g.strokeStyle = "#B9C6BD";
+          g.strokeStyle = color || "#B9C6BD";
           g.lineCap = "round";
           g.lineJoin = "round";
           for (var i = 0; i < roads.length; i++) {
@@ -1241,19 +1484,23 @@
             g.clearRect(0, 0, wpx, hpx);
           }
           g.setTransform(res, 0, 0, res, -x0 * res, -y0 * res);
-          drawPolyList(g, terrain.land, box, "#C3F1D5");
-          drawPolyList(g, terrain.vegetation || [], box, "#9BDFB4");
-          drawPolyList(g, terrain.water, box, "#0042C2");
-          drawRoads(g, box);
-          drawPolyList(g, terrain.buildings || [], box, "#DCD3C4", "#B3A896");
-          drawPolyList(g, terrain.piers, box, "#9FCEB2", "#6B9C80");
+          var palette = terrainPalette();
+          drawShallows(g, box, palette);
+          drawPolyList(g, terrain.land, box, palette.land);
+          drawPolyList(g, terrain.vegetation || [], box, palette.vegetation);
+          drawPolyList(g, terrain.glaciers || [], box, palette.glacier, palette.glacierStroke);
+          drawPolyList(g, terrain.water, box, palette.inlandWater);
+          drawRoads(g, box, palette.road);
+          drawPolyList(g, terrain.buildings || [], box, palette.building, palette.buildingStroke);
+          drawPolyList(g, terrain.piers, box, palette.pier, palette.pierStroke);
           terrainBox = box;
         }
 
         function drawTerrain(vb) {
-          ctx.fillStyle = "#0042C2";
+          ctx.fillStyle = terrainPalette().sea;
           ctx.fillRect(vb.minx, vb.miny, vb.maxx - vb.minx, vb.maxy - vb.miny);
           drawCurrentLayer();
+          drawWaveFront(vb);
           if (!terrainBox || vb.minx < terrainBox.minx || vb.maxx > terrainBox.maxx ||
               vb.miny < terrainBox.miny || vb.maxy > terrainBox.maxy) bakeTerrain();
           ctx.drawImage(terrainBuf, terrainBox.minx, terrainBox.miny,
@@ -1445,15 +1692,15 @@
         }
 
         function drawWindParticles() {
-          var ws = windSpeedNow();
           var d = (level.wind.from + 180) * Math.PI / 180;
-          var lx = Math.sin(d) * (2 + ws * 0.8), ly = -Math.cos(d) * (2 + ws * 0.8);
           ctx.strokeStyle = "#FFFFFF";
           ctx.globalAlpha = 0.35;
           ctx.lineWidth = 0.8;
           ctx.beginPath();
           for (var i = 0; i < windParticles.length; i++) {
             var p = windParticles[i];
+            var ws = windSpeedAt(p[0], p[1]);
+            var lx = Math.sin(d) * (2 + ws * 0.8), ly = -Math.cos(d) * (2 + ws * 0.8);
             ctx.moveTo(p[0] - lx, p[1] - ly);
             ctx.lineTo(p[0], p[1]);
           }
@@ -1483,11 +1730,12 @@
 
         function drawDebugWorld() {
           /* predicted track: coast 120 s ahead on frozen u/v/r plus the current */
-          var cd = level.current.to * Math.PI / 180, cs = level.current.speed;
+          var cd = level.current.to * Math.PI / 180;
           var px = ship.x, py = ship.y, ph = ship.heading, step = 2;
           ctx.fillStyle = "#FFD400";
           for (var t = step; t <= 120; t += step) {
             ph += ship.r * step;
+            var cs = currentSpeedAt(px, py);
             px += (ship.u * Math.sin(ph) + ship.v * Math.cos(ph) + cs * Math.sin(cd)) * step;
             py += (-ship.u * Math.cos(ph) + ship.v * Math.sin(ph) - cs * Math.cos(cd)) * step;
             ctx.globalAlpha = 1 - t / 150;
@@ -1641,7 +1889,7 @@
           ctx.fillStyle = "#FFFFFF";
           ctx.fillText("WIND", wx + 46, 34);
           ctx.fillText((ws * 1.944).toFixed(0) + " kn", wx + 46, 52);
-          var cs = level.current.speed;
+          var cs = currentSpeedAt(ship.x, ship.y);
           var curTo = level.current.to * Math.PI / 180;
           drawArrow(wx + 20, 98, curTo, 34, cs > 0 ? "#7FD4FF" : "rgba(255,255,255,0.25)");
           ctx.fillStyle = "#FFFFFF";
@@ -1674,6 +1922,33 @@
           }
 
           drawBerthPointer();
+          drawWaveWarning();
+        }
+
+        function drawWaveWarning() {
+          if (!waveFront || waveFront.impacted || !level.waves || gameState !== "playing") return;
+          var x = 28, y = canvas.height / 2;
+          ctx.save();
+          ctx.fillStyle = "rgba(0,0,0,0.62)";
+          ctx.fillRect(10, y - 48, 158, 96);
+          ctx.fillStyle = "#67E8F9";
+          for (var i = 0; i < 2; i++) {
+            var ox = x + i * 18;
+            ctx.beginPath();
+            ctx.moveTo(ox + 16, y);
+            ctx.lineTo(ox, y - 16);
+            ctx.lineTo(ox, y + 16);
+            ctx.closePath();
+            ctx.fill();
+          }
+          var remain = Math.max(0, waveFront.impactTime - wavePlayTime);
+          ctx.font = "17px Impact";
+          ctx.fillText("LARGE WAVE", 72, y - 17);
+          ctx.font = "20px Impact";
+          ctx.fillText("FACE W", 72, y + 7);
+          ctx.font = "16px Impact";
+          ctx.fillText(Math.ceil(remain) + " s", 72, y + 30);
+          ctx.restore();
         }
 
         /* Yellow chevron just inside the screen edge pointing to an off-screen
@@ -1730,12 +2005,12 @@
           var oy = (canvas.height - 640) / 2;
           ctx.fillStyle = "#FFFFFF";
           drawCenteredText("Parking Mania: Nuyina", 150 + oy, "70px Impact");
-          drawCenteredText("Berth the icebreaker RSV Nuyina: Hobart, then a Singapore refit.", 200 + oy, "22px Impact");
+          drawCenteredText("Berth the icebreaker RSV Nuyina: Hobart, Singapore, then Heard Island.", 200 + oy, "22px Impact");
 
           var textY = 270 + oy;
           var lineSpacing = 32;
           drawCenteredText("W / S - throttle ahead and astern", textY, "24px Impact"); textY += lineSpacing;
-          drawCenteredText("A / D - steer (rotate the azimuth thrusters)", textY, "24px Impact"); textY += lineSpacing;
+          drawCenteredText("A / D - steer (rotate the rudders)", textY, "24px Impact"); textY += lineSpacing;
           drawCenteredText("I / O - bow thruster to port / starboard (Numpad 7 / 9)", textY, "24px Impact"); textY += lineSpacing;
           drawCenteredText("K / L - stern thruster to port / starboard (Numpad 1 / 3)", textY, "24px Impact"); textY += lineSpacing;
           drawCenteredText("E - centre the helm     Space / X - all stop     R - retry     C - nav debug", textY, "24px Impact"); textY += lineSpacing;
@@ -1744,7 +2019,7 @@
           drawCenteredText("HIT SPACE TO START", 560 + oy, "28px Impact");
           ctx.font = "12px Arial";
           ctx.fillStyle = "#FFE0CC";
-          ctx.fillText("1-9: jump to a level", 10, canvas.height - 8);
+          ctx.fillText("1-9: jump to a level    0: Level 10", 10, canvas.height - 8);
           drawCredit();
         }
 
@@ -1773,8 +2048,9 @@
         }
 
         function drawIntroPanel() {
-          drawPanel(300);
-          var y = canvas.height / 2 - 96;
+          var sheltered = !!level.shelter;
+          drawPanel(sheltered ? 360 : 300);
+          var y = canvas.height / 2 - (sheltered ? 126 : 96);
           ctx.fillStyle = "#FFFFFF";
           drawCenteredText(level.name, y, "40px Impact");
           y += 44;
@@ -1789,15 +2065,28 @@
             (w.gust ? ", gusting" : "") + "    Current: " +
             (c.speed > 0 ? (c.speed * 1.944).toFixed(1) + " kn setting " + compassName(c.to) : "slack"),
             y, "20px Impact");
-          drawCenteredText("HIT SPACE TO BEGIN", canvas.height / 2 + 116, "26px Impact");
+          if (sheltered) {
+            y += 28;
+            drawCenteredText("Inside Atlas Cove: wind " + (level.shelter.windSpeed * 1.944).toFixed(0) +
+              " kn, current " + (level.shelter.currentSpeed * 1.944).toFixed(1) + " kn",
+              y, "20px Impact");
+          }
+          drawCenteredText("HIT SPACE TO BEGIN", canvas.height / 2 + (sheltered ? 146 : 116), "26px Impact");
           drawCredit();
         }
 
         function drawCrashPanel() {
           drawPanel(200);
           ctx.fillStyle = "#FFFFFF";
-          drawCenteredText("HARD CONTACT!", canvas.height / 2 - 40, "52px Impact");
-          drawCenteredText("You struck something, Captain. The harbourmaster is not impressed.", canvas.height / 2 + 8, "20px Impact");
+          var title = failureReason === "roll" ? "VESSEL ROLLED!" :
+                      failureReason === "ground" ? "AGROUND!" : "HARD CONTACT!";
+          var message = failureReason === "roll" ?
+            "The swell caught Nuyina broadside. Put the bow within 45 degrees of west." :
+            failureReason === "ground" ?
+            "Nuyina entered the 200 m coastal shallows. Keep clear of the pale water." :
+            "You struck something, Captain. The harbourmaster is not impressed.";
+          drawCenteredText(title, canvas.height / 2 - 40, "52px Impact");
+          drawCenteredText(message, canvas.height / 2 + 8, "20px Impact");
           drawCenteredText("HIT SPACE TO RETRY", canvas.height / 2 + 64, "26px Impact");
           drawCredit();
         }
@@ -1816,7 +2105,7 @@
           drawPanel(240);
           ctx.fillStyle = "#FFFFFF";
           drawCenteredText("VOYAGE COMPLETE", canvas.height / 2 - 52, "52px Impact");
-          drawCenteredText("Refitted at Sembawang and ready for Antarctica.", canvas.height / 2 + 4, "22px Impact");
+          drawCenteredText("Safe in Atlas Cove after the Southern Ocean approach.", canvas.height / 2 + 4, "22px Impact");
           drawCenteredText("Well done, Captain.", canvas.height / 2 + 36, "22px Impact");
           drawCenteredText("HIT SPACE FOR THE TITLE SCREEN", canvas.height / 2 + 88, "26px Impact");
           drawCredit();
@@ -1842,6 +2131,7 @@
           simTime = 0;
           holdTimer = 0;
           berthConditionsMet = false;
+          failureReason = "collision";
           wake = [];
           wakeCounter = 0;
           collidables = terrain.land.concat(terrain.piers, obstacles);
@@ -1851,11 +2141,16 @@
           bakeTerrain();  // bake the new shore now rather than hitching on frame one
           scatterWindParticles();
           scatterCurrentParticles();
+          resetWaves();
+          lastLoopReal = performance.now();
           gameState = "intro";
         }
 
         /* ================= main loop ================= */
         function gameLoop() {
+          var now = performance.now();
+          var realDt = Math.max(0, Math.min(0.25, (now - lastLoopReal) / 1000));
+          lastLoopReal = now;
           ctx.clearRect(0, 0, canvas.width, canvas.height);
           if (gameState == "title") {
             drawTitleScreen();
@@ -1864,10 +2159,14 @@
           if (gameState == "playing") {
             stepShip();
             stepNpcs();
-            if (checkCollision() || checkNpcCollision()) {
-              gameState = "crashed";
-            } else {
-              checkBerth();
+            stepWaves(realDt);
+            if (gameState == "playing") {
+              failureReason = "collision";
+              if (checkCollision() || checkNpcCollision()) {
+                gameState = "crashed";
+              } else {
+                checkBerth();
+              }
             }
           }
           advectWindParticles();
@@ -1941,12 +2240,13 @@
           }, 3000);
         }
 
-        /* Dev aid: open as #play3 / #play9 etc to jump straight into a level
+        /* Dev aid: open as #play3 / #play10 etc to jump straight into a level
            (used for headless screenshots; harmless in normal play). */
-        var playHash = /^#play([1-9])$/.exec(location.hash);
+        var playHash = /^#play(10|[1-9])$/.exec(location.hash);
         if (playHash && parseInt(playHash[1], 10) <= LEVELS.length) {
           startLevel(parseInt(playHash[1], 10) - 1);
           gameState = "playing";
+          gameLoop(); // render immediately for headless screenshots and slow first timers
         }
 
         /* Singapore self-check: parking-mania-nuyina.html#test-sg drives off
@@ -2029,6 +2329,96 @@
             div.textContent = JSON.stringify(result);
             document.body.appendChild(div);
           }, 7000);
+        }
+
+        /* Heard Island self-check: terrain, spatial sheltering, empty traffic,
+           stationkeeping, warning creation and both wave outcomes. */
+        if (location.hash == "#test-heard") {
+          startLevel(9);
+          gameState = "playing";
+          var result = {};
+          result.npcs = npcs.length;
+          result.startClear = !checkCollision() && !checkNpcCollision();
+          result.glaciers = (terrain.glaciers || []).length;
+          result.shallows = (terrain.shallows || []).length;
+          result.shallowBands = (terrain.shallowBands || []).length;
+
+          var sx = level.shelter.cx, sy = level.shelter.cy;
+          result.offshoreWind = Math.round(windBaseAt(level.start.x, level.start.y) * 1.944 * 10) / 10;
+          result.offshoreCurrent = Math.round(currentSpeedAt(level.start.x, level.start.y) * 1.944 * 10) / 10;
+          result.bayWind = Math.round(windBaseAt(sx, sy) * 1.944 * 10) / 10;
+          result.bayCurrent = Math.round(currentSpeedAt(sx, sy) * 1.944 * 10) / 10;
+          result.midCurrent = Math.round(currentSpeedAt(sx - 1650, sy) * 1.944 * 100) / 100;
+          var beamHeading = (level.wind.from + 90) * Math.PI / 180;
+          var peakBeamLoad = windLoadsAt(level.start.x, level.start.y, beamHeading,
+                                         level.wind.gustPeak);
+          var oneThrusterYaw = Math.min(BOW_ARM, STERN_ARM) * THRUSTER_F;
+          var fullPodYaw = STERN_ARM * THRUST_AHEAD * Math.sin(AZIMUTH_MAX);
+          result.peakWindYaw = Math.round(Math.abs(peakBeamLoad.n));
+          result.thrusterAuthority = oneThrusterYaw > Math.abs(peakBeamLoad.n);
+          result.steeringAuthority = fullPodYaw > Math.abs(peakBeamLoad.n);
+
+          ship.x = level.berth.cx; ship.y = level.berth.cy;
+          ship.heading = 270 * Math.PI / 180;
+          ship.u = 0; ship.v = 0; ship.r = 0;
+          result.targetClear = !checkCollision();
+          checkBerth();
+          result.berthOK = berthConditionsMet;
+
+          var shore = heardPt([-53.01909761, 73.39338781]);
+          ship.x = shore[0]; ship.y = shore[1];
+          result.hitShore = checkCollision();
+
+          var shallowProbe = terrain.shallows[0].pts[0];
+          ship.x = shallowProbe[0]; ship.y = shallowProbe[1];
+          failureReason = "collision";
+          result.grounded = checkCollision() && failureReason === "ground";
+
+          ship.x = sx; ship.y = sy;
+          ship.heading = 270 * Math.PI / 180;
+          ship.u = 0; ship.v = 0; ship.r = 0;
+          failureReason = "collision"; gameState = "playing";
+          resolveWaveImpact();
+          result.safeWave = gameState === "playing" && Math.abs(Math.hypot(ship.u, ship.v) - 0.75) < 0.001;
+
+          ship.heading = 180 * Math.PI / 180;
+          failureReason = "collision"; gameState = "playing";
+          resolveWaveImpact();
+          result.rolled = gameState === "crashed" && failureReason === "roll";
+
+          gameState = "playing";
+          resetWaves();
+          nextWaveTime = level.waves.warningReal;
+          stepWaves(0);
+          result.warning = !!waveFront && waveFront.relative < 0;
+
+          ship.x = sx; ship.y = sy;
+          ship.heading = 270 * Math.PI / 180;
+          ship.u = 0; ship.v = 0; ship.r = 0;
+          failureReason = "collision"; gameState = "playing";
+          waveFront = { x: ship.x - 0.1, relative: -0.1,
+                        impactTime: wavePlayTime, impacted: false };
+          stepWaves(0);
+          var firstImpulse = Math.hypot(ship.u, ship.v);
+          result.waveContinues = !!waveFront && waveFront.impacted;
+          stepWaves(0);
+          result.oneWaveImpact = !!waveFront && Math.abs(Math.hypot(ship.u, ship.v) - firstImpulse) < 0.001;
+          waveFront.x = ship.x + level.waves.passDistance + 1;
+          waveFront.relative = level.waves.passDistance + 1;
+          stepWaves(0);
+          result.waveClears = !waveFront;
+          result.pass = result.npcs === 0 && result.startClear && result.targetClear &&
+            result.hitShore && result.grounded && result.glaciers > 0 && result.shallows > 0 &&
+            result.shallowBands >= result.shallows * 4 && result.berthOK && result.offshoreWind === 60 &&
+            result.offshoreCurrent === 5 && result.bayWind === 50 && result.bayCurrent === 0.5 &&
+            result.midCurrent > 0.5 && result.midCurrent < 5 && result.safeWave &&
+            result.rolled && result.warning && result.waveContinues && result.oneWaveImpact &&
+            result.waveClears && result.peakWindYaw > 0 && result.thrusterAuthority &&
+            result.steeringAuthority;
+          var div = document.createElement("div");
+          div.id = "test-result";
+          div.textContent = JSON.stringify(result);
+          document.body.appendChild(div);
         }
     </script>
 </body>

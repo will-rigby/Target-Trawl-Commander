@@ -16,7 +16,7 @@ without strokes and collides against any polygon, so no boolean union is
 needed. Decorations are deduplicated by OSM id.
 
 Usage:  python build_terrain.py [region] [--refresh]
-  region      hobart (default) or singapore
+  region      hobart (default), singapore, or heard
   --refresh   ignore the per-rectangle caches and re-fetch from the API
 
 Python 3 stdlib only. Data (c) OpenStreetMap contributors, ODbL.
@@ -149,6 +149,30 @@ REGIONS = {
                    ("land", 1.480, 103.860, "Johor shore"),
                    ("water", 1.4624029, 103.8231973, "KGVI dock (carved)")],
     },
+    "heard": {
+        # North-west Heard Island: the offshore approach past Red Island and
+        # the whole of Atlas Cove.  The compact rectangle keeps the generated
+        # terrain light while leaving several kilometres around both gameplay
+        # coordinates for collision and camera rendering.
+        "rects": [{"south": -53.045, "west": 73.245,
+                   "north": -52.935, "east": 73.425}],
+        "cache_files": ["overpass-cache-heard.json"],
+        "out_file": "../heard-terrain.js",
+        "global_name": "HEARD_TERRAIN",
+        "fixups": {},
+        "carves": [],
+        "coast_joins": [],
+        "join_eps": 0.5,
+        "centerline_fallback": False,
+        "around_m": 600,
+        "building_min_area": 20.0,
+        "shallow_m": 200.0,
+        "probes": [
+            ("water", -52.97273, 73.26765, "Heard Island approach (L10 start)"),
+            ("water", -53.021397, 73.383085, "Atlas Cove stationkeeping target"),
+            ("land", -53.01909761, 73.39338781, "Atlas Cove station shore"),
+        ],
+    },
 }
 
 # ---------------- projection ----------------
@@ -198,6 +222,8 @@ way["natural"="coastline"]->.coast;
   way["man_made"="quay"];
   way["natural"="water"];
   relation["natural"="water"];
+  way["natural"="glacier"];
+  relation["natural"="glacier"];
   way["man_made"="bridge"];
   way["highway"]["bridge"];
   node["man_made"="bridge_support"];
@@ -614,6 +640,54 @@ def buffer_polyline(pts, width):
         right.append((pts[i][0] - nx * hw, pts[i][1] - ny * hw))
     return left + list(reversed(right))
 
+
+def offset_ring(pts, distance_m):
+    """Approximate an outward parallel ring at a fixed metric distance.
+
+    Coastline rings can have either winding after clipping, so determine the
+    outward side by probing the longest edge. Vertex joins use capped mitres;
+    the cap prevents sharp coves and headlands from producing enormous spikes.
+    The original land is rendered over these rings, leaving only the seaward
+    strip visible.
+    """
+    if len(pts) < 3 or distance_m <= 0:
+        return list(pts)
+
+    longest = max(range(len(pts)),
+                  key=lambda i: math.dist(pts[i], pts[(i + 1) % len(pts)]))
+    a, b = pts[longest], pts[(longest + 1) % len(pts)]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    ln = math.hypot(dx, dy) or 1.0
+    left = (-dy / ln, dx / ln)
+    mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    left_probe = (mid[0] + left[0] * 2, mid[1] + left[1] * 2)
+    outward_sign = -1.0 if point_in_poly(pts, left_probe) else 1.0
+
+    out = []
+    n = len(pts)
+    for i, p in enumerate(pts):
+        prev, nxt = pts[(i - 1) % n], pts[(i + 1) % n]
+        e1 = (p[0] - prev[0], p[1] - prev[1])
+        e2 = (nxt[0] - p[0], nxt[1] - p[1])
+        l1, l2 = math.hypot(*e1) or 1.0, math.hypot(*e2) or 1.0
+        n1 = (-e1[1] / l1 * outward_sign, e1[0] / l1 * outward_sign)
+        n2 = (-e2[1] / l2 * outward_sign, e2[0] / l2 * outward_sign)
+        bx, by = n1[0] + n2[0], n1[1] + n2[1]
+        bl = math.hypot(bx, by)
+        if bl < 1e-6:
+            bx, by, scale = n2[0], n2[1], distance_m
+        else:
+            bx, by = bx / bl, by / bl
+            denom = max(0.35, bx * n2[0] + by * n2[1])
+            scale = min(distance_m / denom, distance_m * 2.5)
+        q = (p[0] + bx * scale, p[1] + by * scale)
+        # Very tight concavities can point a miter back into the land. A plain
+        # edge-normal offset is a safer local fallback for the shallow zone.
+        if point_in_poly(pts, q):
+            q = (p[0] + n2[0] * distance_m, p[1] + n2[1] * distance_m)
+        out.append(q)
+    return out
+
 # ---------------- carve-splice (dock basins cut into collidable land) ----------------
 
 
@@ -882,6 +956,37 @@ def process_rect(osm, region):
                                "_id": w["id"], "_full": all_inside(raw)})
     stats["vegetation polygons"] = len(vegetation)
 
+    glaciers = []
+    glacier_member_ids = {
+        m["ref"] for rel in rels if rel.get("tags", {}).get("natural") == "glacier"
+        for m in rel.get("members", []) if m.get("type") == "way" and m.get("role") in ("outer", "")
+    }
+    for w in by_tag("natural", "glacier"):
+        if w["id"] in glacier_member_ids or w["nodes"][0] != w["nodes"][-1]:
+            continue
+        raw = way_pts(w)[:-1]
+        pts = clip_poly_rect(raw)
+        if len(pts) >= 3:
+            glaciers.append({"name": w["tags"].get("name") or f"glacier-{w['id']}",
+                             "pts": pts, "_id": w["id"], "_full": all_inside(raw)})
+    for rel in rels:
+        tags = rel.get("tags", {})
+        if tags.get("natural") != "glacier":
+            continue
+        outers = [ways[m["ref"]] for m in rel.get("members", [])
+                  if m.get("type") == "way" and m.get("role") in ("outer", "") and m["ref"] in ways]
+        for ri, ring in enumerate(stitch_chains(outers)):
+            if not ring["closed"]:
+                print("  skipped unstitchable glacier relation", rel["id"], tags.get("name", ""))
+                continue
+            raw = [nodes[i] for i in ring["nodes"][:-1] if i in nodes]
+            pts = clip_poly_rect(raw)
+            if len(pts) >= 3:
+                glaciers.append({"name": tags.get("name") or f"glacier-rel-{rel['id']}-{ri}",
+                                 "pts": pts, "_id": f"rel-{rel['id']}-{ri}",
+                                 "_full": all_inside(raw)})
+    stats["glacier polygons"] = len(glaciers)
+
     roads = []
     for w in by_tag("highway"):
         t = w["tags"]
@@ -899,12 +1004,13 @@ def process_rect(osm, region):
 
     return {"land": land, "piers": piers, "water": water, "bridge_deck": bridge_deck,
             "bridge_centerline": bridge_centerline, "bridge_supports": bridge_supports,
-            "buildings": buildings, "vegetation": vegetation, "roads": roads}, stats
+            "buildings": buildings, "vegetation": vegetation, "glaciers": glaciers,
+            "roads": roads}, stats
 
 # ---------------- region assembly ----------------
 
 DEDUPE_LAYERS = ("piers", "water", "bridge_deck", "bridge_supports", "buildings",
-                 "vegetation", "roads")
+                 "vegetation", "glaciers", "roads")
 
 
 def merge_region(per_rect, offsets):
@@ -986,6 +1092,21 @@ def build_region(name, refresh):
     for carve in region["carves"]:
         apply_carve(merged["land"], carve)
 
+    shallow_m = region.get("shallow_m", 0.0)
+    shallows = []
+    shallow_bands = []
+    if shallow_m > 0:
+        for i, ring in enumerate(merged["land"]):
+            shallows.append({"name": f"shallow-{i}-{shallow_m:g}m",
+                             "pts": offset_ring(ring, shallow_m), "distance": shallow_m})
+            for d in (shallow_m * 0.8, shallow_m * 0.6,
+                      shallow_m * 0.4, shallow_m * 0.2):
+                if d < shallow_m:
+                    shallow_bands.append({"name": f"shallow-{i}-{d:g}m",
+                                          "pts": offset_ring(ring, d), "distance": d})
+        stats["shallow collision polygons"] = len(shallows)
+        stats["shallow gradient bands"] = len(shallow_bands)
+
     # ---- simplify + finalize ----
     counts = {"raw": 0, "simplified": 0}
 
@@ -997,8 +1118,11 @@ def build_region(name, refresh):
             pts = simplify_ring(src, tol) if is_ring else src
             pts = [[round(x, 1), round(y, 1)] for x, y in pts]
             counts["simplified"] += len(pts)
-            out_list.append({"name": item["name"], "pts": pts,
-                             "bbox": [round(v, 1) for v in poly_bbox(pts)]})
+            entry = {"name": item["name"], "pts": pts,
+                     "bbox": [round(v, 1) for v in poly_bbox(pts)]}
+            if "distance" in item:
+                entry["distance"] = item["distance"]
+            out_list.append(entry)
         return out_list
 
     out = {
@@ -1012,9 +1136,12 @@ def build_region(name, refresh):
         },
         "land": finalize([{"name": f"land-{i}", "pts": pts}
                           for i, pts in enumerate(merged["land"])], True),
+        "shallows": finalize(shallows, True, 0.75),
+        "shallowBands": finalize(shallow_bands, True, 0.75),
         "piers": finalize(merged["piers"], True),
         "water": finalize(merged["water"], True),
         "vegetation": finalize(merged["vegetation"], True, 2.0),
+        "glaciers": finalize(merged["glaciers"], True, 1.0),
         "buildings": finalize(merged["buildings"], True, 0.5),
         "bridgeDeck": finalize(merged["bridge_deck"], True),
         "bridgeSupports": [{"name": s["name"],
@@ -1067,7 +1194,8 @@ def build_region(name, refresh):
         f"var {region['global_name']} = {{",
         f"meta: {js(out['meta'])},",
     ]
-    for key in ("land", "piers", "water", "vegetation", "buildings", "roads",
+    for key in ("land", "shallows", "shallowBands", "piers", "water", "vegetation",
+                "glaciers", "buildings", "roads",
                 "bridgeDeck", "bridgeSupports"):
         lines.append(f"{key}: [")
         lines.extend(js(poly) + "," for poly in out[key])
