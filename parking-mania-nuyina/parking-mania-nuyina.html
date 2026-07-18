@@ -1995,6 +1995,10 @@
           var textString = "Will Rigby, Polar Tech Design Team";
           var textWidth = ctx.measureText(textString).width;
           ctx.fillText(textString, canvas.width - 3 - textWidth, canvas.height - 3);
+
+          var osmString = "Hobart, Singapore & Heard Island terrain data © OpenStreetMap contributors, ODbL 1.0";
+          var osmWidth = ctx.measureText(osmString).width;
+          ctx.fillText(osmString, canvas.width - 3 - osmWidth, canvas.height - 13);
         }
 
         function drawTitleScreen() {
