@@ -1,0 +1,1907 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Polar Pilot</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #071928;
+      color: #fff;
+      font-family: "Trebuchet MS", Arial, sans-serif;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+    }
+    #test-result {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      padding: 8px;
+      background: #fff;
+      color: #111;
+      font: 14px/1.35 Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" aria-label="Polar Pilot helicopter flight game"></canvas>
+
+  <script>
+    "use strict";
+
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    /* ================= flight tuning =================
+       World coordinates are metres, with altitude increasing upward.
+       Angles are radians. Positive attitude tilts the rotor thrust right. */
+    const FIXED_DT = 1 / 60;
+    const GRAVITY = 9.81;
+    const MAX_LIFT_ACCEL = GRAVITY * 1.8;
+    const COLLECTIVE_RATE = 0.35;
+    const CYCLIC_TARGET_RATE = 55 * Math.PI / 180;
+    const ATTITUDE_STIFFNESS = 38;
+    const ATTITUDE_DAMPING = 11;
+    const MAX_ANGULAR_RATE = 95 * Math.PI / 180;
+    const HORIZONTAL_DRAG = 0.04;
+    const HORIZONTAL_QUADRATIC_DRAG = 0.003;
+    const VERTICAL_DRAG = 0.065;
+    const VERTICAL_QUADRATIC_DRAG = 0.002;
+    const MAX_HORIZONTAL_SPEED = 55;
+    const MAX_VERTICAL_SPEED = 30;
+    const SAFE_DESCENT_SPEED = 3;
+    const SAFE_LATERAL_SPEED = 4;
+    const SAFE_LANDING_ANGLE = 12 * Math.PI / 180;
+    const SAFE_ANGULAR_RATE = 28 * Math.PI / 180;
+    const DIRECTION_FLIP_SPEED = 12;
+    const SCOUT_X = 650;
+    const SCOUT_PEAK_Y = 34;
+    const SCOUT_RADIUS = 60;
+    const SCOUT_TIME = 4;
+    const CABLE_MAX_LENGTH = 12;
+    const CABLE_RATE = CABLE_MAX_LENGTH / 1.5;
+    const LOAD_MASS_RATIO = 0.3;
+    const PALLET_WIDTH = 6;
+    const PALLET_HEIGHT = 4;
+    const PALLET_PICKUP_X = 76;
+    const CARGO_ZONE = { x1: 1665, x2: 1745 };
+    const SKID_DROP = 2.25;
+    const HELI_RADIUS = 4.8;
+    const PIXELS_PER_METRE = 4;
+    const SHIP_DECK_Y = 14;
+    const STATION_PAD_Y = 12;
+    const WORLD_MIN_X = -300;
+    const WORLD_MAX_X = 2300;
+
+    const SHIP_DECK = { x1: 92, x2: 176, y: SHIP_DECK_Y, name: "RSV NUYINA" };
+    const STATION_PAD = { x1: 1768, x2: 1864, y: STATION_PAD_Y, name: "AURORA STATION" };
+    const BUILDINGS = [
+      { x1: 1900, x2: 1955, y1: 5, y2: 28 },
+      { x1: 1970, x2: 2028, y1: 5, y2: 22 },
+      { x1: 2050, x2: 2072, y1: 5, y2: 35 },
+    ];
+
+    const LEVELS = [
+      {
+        number: 1,
+        name: "Iceberg Scout",
+        mission: "scout",
+        station: false,
+        worldMaxX: 1250,
+        brief: "Launch from RSV Nuyina, inspect the iceberg from a steady close hover, then return to the ship.",
+      },
+      {
+        number: 2,
+        name: "Expeditioner Transfer",
+        mission: "passengers",
+        station: true,
+        worldMaxX: 2300,
+        brief: "Six expeditioners are aboard. Fly them safely from RSV Nuyina to Aurora Station.",
+      },
+      {
+        number: 3,
+        name: "Cage Pallet Lift",
+        mission: "sling",
+        station: true,
+        worldMaxX: 2300,
+        brief: "Sling three cage pallets to the station cargo zone, then return and land aboard Nuyina.",
+      },
+    ];
+
+    const input = {
+      left: false,
+      right: false,
+      up: false,
+      down: false,
+      level: false,
+    };
+    const helicopter = {
+      x: 134,
+      y: SHIP_DECK_Y + SKID_DROP,
+      vx: 0,
+      vy: 0,
+      angle: 0,
+      targetAngle: 0,
+      angularVelocity: 0,
+      collective: 0,
+      landed: true,
+      landedAt: SHIP_DECK.name,
+      facing: 1,
+    };
+
+    let gameState = "title"; // title | briefing | playing | crashed | levelComplete | gameComplete
+    let crashReason = "";
+    let levelIndex = 0;
+    let level = LEVELS[0];
+    let scoutTimer = 0;
+    let icebergScouted = false;
+    let passengersAboard = 0;
+    let deliveries = 0;
+    let deliveredPallets = [];
+    let pallet = null;
+    let cableLength = 0;
+    let cableTargetLength = 0;
+    let missionNotice = "";
+    let missionNoticeTimer = 0;
+    let viewWidth = 960;
+    let viewHeight = 640;
+    let deviceScale = 1;
+    let cameraX = helicopter.x;
+    let cameraY = 30;
+    let rotorPhase = 0;
+    let elapsed = 0;
+    let lastFrame = performance.now();
+    let accumulator = 0;
+    let testMode = false;
+
+    const snow = [];
+    const washParticles = [];
+
+    window.onerror = function(message, source, line) {
+      const error = document.createElement("div");
+      error.id = "test-result";
+      error.style.background = "#8b1520";
+      error.style.color = "#fff";
+      error.textContent = "ERROR: " + message + " (line " + line + ")";
+      document.body.appendChild(error);
+    };
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function lerp(a, b, amount) {
+      return a + (b - a) * amount;
+    }
+
+    function resizeCanvas() {
+      viewWidth = Math.max(320, window.innerWidth);
+      viewHeight = Math.max(420, window.innerHeight);
+      deviceScale = Math.min(2, window.devicePixelRatio || 1);
+      canvas.width = Math.round(viewWidth * deviceScale);
+      canvas.height = Math.round(viewHeight * deviceScale);
+      canvas.style.width = viewWidth + "px";
+      canvas.style.height = viewHeight + "px";
+      ctx.setTransform(deviceScale, 0, 0, deviceScale, 0, 0);
+      seedSnow();
+    }
+
+    function seedSnow() {
+      snow.length = 0;
+      const count = Math.round(clamp(viewWidth * viewHeight / 9000, 55, 170));
+      for (let i = 0; i < count; i++) {
+        snow.push({
+          x: Math.random() * viewWidth,
+          y: Math.random() * viewHeight,
+          speed: 18 + Math.random() * 38,
+          drift: 5 + Math.random() * 12,
+          size: 0.7 + Math.random() * 1.8,
+          alpha: 0.25 + Math.random() * 0.55,
+        });
+      }
+    }
+
+    function clearInput() {
+      input.left = input.right = input.up = input.down = input.level = false;
+    }
+
+    function resetAircraft() {
+      helicopter.x = 134;
+      helicopter.y = SHIP_DECK_Y + SKID_DROP;
+      helicopter.vx = 0;
+      helicopter.vy = 0;
+      helicopter.angle = 0;
+      helicopter.targetAngle = 0;
+      helicopter.angularVelocity = 0;
+      helicopter.collective = 0;
+      helicopter.landed = true;
+      helicopter.landedAt = SHIP_DECK.name;
+      helicopter.facing = 1;
+    }
+
+    function spawnPallet() {
+      pallet = {
+        x: PALLET_PICKUP_X,
+        y: SHIP_DECK_Y + PALLET_HEIGHT,
+        vx: 0,
+        vy: 0,
+        status: "waiting", // waiting | attached | free
+      };
+    }
+
+    function resetLevel(nextState) {
+      resetAircraft();
+      cameraX = helicopter.x;
+      cameraY = 30;
+      crashReason = "";
+      elapsed = 0;
+      scoutTimer = 0;
+      icebergScouted = false;
+      passengersAboard = level.mission === "passengers" ? 6 : 0;
+      deliveries = 0;
+      deliveredPallets = [];
+      pallet = null;
+      cableLength = 0;
+      cableTargetLength = 0;
+      missionNotice = "";
+      missionNoticeTimer = 0;
+      if (level.mission === "sling") spawnPallet();
+      washParticles.length = 0;
+      clearInput();
+      gameState = nextState || "briefing";
+    }
+
+    function startLevel(index, directPlay) {
+      levelIndex = clamp(index, 0, LEVELS.length - 1);
+      level = LEVELS[levelIndex];
+      resetLevel(directPlay ? "playing" : "briefing");
+    }
+
+    /* Compatibility helper used by the built-in baseline flight checks. */
+    function resetGame(startPlaying) {
+      levelIndex = 0;
+      level = LEVELS[0];
+      resetLevel(startPlaying ? "playing" : "title");
+    }
+
+    function iceHeightAt(x) {
+      if (!level.station) return -Infinity;
+      if (x < 1570) return -Infinity;
+      return 4.2 + Math.sin(x * 0.021) * 0.7 + Math.sin(x * 0.053) * 0.35;
+    }
+
+    function icebergHeightAt(x) {
+      if (level.mission !== "scout" || x < 555 || x > 745) return -Infinity;
+      const points = [
+        [555, 0], [580, 8], [610, 18], [636, 31],
+        [650, SCOUT_PEAK_Y], [672, 24], [705, 13], [745, 0],
+      ];
+      for (let i = 1; i < points.length; i++) {
+        if (x <= points[i][0]) {
+          const a = points[i - 1], b = points[i];
+          const t = (x - a[0]) / (b[0] - a[0]);
+          return lerp(a[1], b[1], t);
+        }
+      }
+      return 0;
+    }
+
+    function landingSurfaceAt(x) {
+      if (x >= SHIP_DECK.x1 && x <= SHIP_DECK.x2) return SHIP_DECK;
+      if (level.station && x >= STATION_PAD.x1 && x <= STATION_PAD.x2) return STATION_PAD;
+      return null;
+    }
+
+    function solidHeightAt(x) {
+      if (x >= -130 && x <= 58) {
+        if (x >= -55 && x <= 42) return 39;
+        return 18 - Math.abs(x + 35) * 0.025;
+      }
+      if (x > 58 && x <= 196) return SHIP_DECK_Y;
+      return Math.max(iceHeightAt(x), icebergHeightAt(x));
+    }
+
+    function lowestSkidAltitude() {
+      const sin = Math.sin(helicopter.angle);
+      const cos = Math.cos(helicopter.angle);
+      const left = helicopter.y - (-2.7 * sin + SKID_DROP * cos);
+      const right = helicopter.y - (2.7 * sin + SKID_DROP * cos);
+      return Math.min(left, right);
+    }
+
+    function helicopterHitsBuilding() {
+      if (!level.station) return false;
+      for (const building of BUILDINGS) {
+        const nearestX = clamp(helicopter.x, building.x1, building.x2);
+        const nearestY = clamp(helicopter.y, building.y1, building.y2);
+        const dx = helicopter.x - nearestX;
+        const dy = helicopter.y - nearestY;
+        if (dx * dx + dy * dy < HELI_RADIUS * HELI_RADIUS) return true;
+      }
+      return false;
+    }
+
+    function crash(reason) {
+      if (gameState !== "playing") return;
+      crashReason = reason;
+      gameState = "crashed";
+      helicopter.landed = false;
+      clearInput();
+    }
+
+    function completeLevel() {
+      if (gameState !== "playing") return;
+      gameState = "levelComplete";
+      clearInput();
+    }
+
+    function setMissionNotice(text) {
+      missionNotice = text;
+      missionNoticeTimer = 2.5;
+    }
+
+    function settleLanding(surface) {
+      helicopter.y = surface.y + SKID_DROP;
+      helicopter.vx = 0;
+      helicopter.vy = 0;
+      helicopter.angle = 0;
+      helicopter.targetAngle = 0;
+      helicopter.angularVelocity = 0;
+      helicopter.landed = true;
+      helicopter.landedAt = surface.name;
+      if (level.mission === "scout" && icebergScouted && surface === SHIP_DECK) {
+        completeLevel();
+      } else if (level.mission === "passengers" && surface === STATION_PAD) {
+        passengersAboard = 0;
+        completeLevel();
+      } else if (level.mission === "sling" && deliveries === 3 && surface === SHIP_DECK) {
+        completeLevel();
+      }
+    }
+
+    function checkContact() {
+      if (helicopterHitsBuilding()) {
+        crash("You struck the station buildings.");
+        return;
+      }
+
+      const skidAltitude = lowestSkidAltitude();
+      const landingSurface = landingSurfaceAt(helicopter.x);
+      if (landingSurface && skidAltitude <= landingSurface.y + 0.03 && helicopter.vy <= 0) {
+        const safe = -helicopter.vy <= SAFE_DESCENT_SPEED &&
+          Math.abs(helicopter.vx) <= SAFE_LATERAL_SPEED &&
+          Math.abs(helicopter.angle) <= SAFE_LANDING_ANGLE &&
+          Math.abs(helicopter.angularVelocity) <= SAFE_ANGULAR_RATE;
+        if (safe) settleLanding(landingSurface);
+        else crash("Hard landing — lower the collective earlier and touch down level.");
+        return;
+      }
+
+      const solidHeight = solidHeightAt(helicopter.x);
+      if (skidAltitude <= solidHeight) {
+        crash(
+          helicopter.x < 300 ? "You struck RSV Nuyina." :
+          level.mission === "scout" ? "You struck the iceberg." :
+          "You struck the ice — use the marked station helipad."
+        );
+        return;
+      }
+
+      if (skidAltitude <= 0) {
+        crash("Water impact — keep enough collective to arrest the descent.");
+        return;
+      }
+
+      if (helicopter.x < WORLD_MIN_X || helicopter.x > level.worldMaxX) {
+        crash("You left the local flight area.");
+      }
+    }
+
+    function cargoGroundY() {
+      return iceHeightAt((CARGO_ZONE.x1 + CARGO_ZONE.x2) / 2);
+    }
+
+    function loadAttached() {
+      return !!pallet && pallet.status === "attached";
+    }
+
+    function slingHardpoint() {
+      return { x: helicopter.x, y: helicopter.y - 1.3 };
+    }
+
+    function palletSurfaceY(x) {
+      const solid = solidHeightAt(x);
+      return Number.isFinite(solid) ? Math.max(0, solid) : 0;
+    }
+
+    function palletHitsBuilding() {
+      if (!pallet || !level.station) return false;
+      const centreY = pallet.y - PALLET_HEIGHT / 2;
+      for (const b of BUILDINGS) {
+        if (pallet.x + PALLET_WIDTH / 2 > b.x1 &&
+            pallet.x - PALLET_WIDTH / 2 < b.x2 &&
+            centreY + PALLET_HEIGHT / 2 > b.y1 &&
+            centreY - PALLET_HEIGHT / 2 < b.y2) return true;
+      }
+      return false;
+    }
+
+    function replacePallet(message) {
+      if (deliveries >= 3) {
+        pallet = null;
+        return;
+      }
+      spawnPallet();
+      cableTargetLength = cableLength > 0 ? CABLE_MAX_LENGTH : 0;
+      setMissionNotice(message || "LOAD BROKEN — REPLACEMENT READY");
+    }
+
+    function attachPallet() {
+      if (!pallet) return;
+      pallet.status = "attached";
+      setMissionNotice("CAGE ATTACHED");
+    }
+
+    function deliveryIsValid() {
+      if (!pallet) return false;
+      const ground = cargoGroundY();
+      const bottom = pallet.y - PALLET_HEIGHT;
+      return pallet.x >= CARGO_ZONE.x1 + PALLET_WIDTH / 2 &&
+        pallet.x <= CARGO_ZONE.x2 - PALLET_WIDTH / 2 &&
+        bottom <= ground + 0.75 &&
+        Math.abs(pallet.vx) <= 1.5 &&
+        Math.abs(pallet.vy) <= 1;
+    }
+
+    function releasePallet() {
+      if (!loadAttached()) return;
+      if (deliveryIsValid()) {
+        const slot = deliveries;
+        deliveredPallets.push({
+          x: CARGO_ZONE.x1 + 13 + slot * 18,
+          y: cargoGroundY() + PALLET_HEIGHT,
+        });
+        deliveries++;
+        pallet = null;
+        setMissionNotice("CAGE DELIVERED — " + deliveries + " / 3");
+        if (deliveries < 3) spawnPallet();
+        else setMissionNotice("ALL CAGES DELIVERED — RETURN TO NUYINA");
+        return;
+      }
+
+      const ground = palletSurfaceY(pallet.x);
+      const bottom = pallet.y - PALLET_HEIGHT;
+      const tooHigh = bottom > ground + 0.75;
+      const tooFast = Math.abs(pallet.vx) > 1.5 || Math.abs(pallet.vy) > 1;
+      if (tooHigh || tooFast || palletHitsBuilding()) {
+        replacePallet("LOAD BROKEN — REPLACEMENT READY");
+      } else {
+        pallet.status = "free";
+        setMissionNotice("CAGE RELEASED OUTSIDE CARGO ZONE");
+      }
+    }
+
+    function handleLoadKey() {
+      if (gameState !== "playing" || level.mission !== "sling") return;
+      if (loadAttached()) {
+        releasePallet();
+      } else if (cableTargetLength > 0) {
+        cableTargetLength = 0;
+        setMissionNotice("LOAD LINE RETRACTING");
+      } else {
+        cableTargetLength = CABLE_MAX_LENGTH;
+        setMissionNotice("LOAD LINE LOWERING");
+      }
+    }
+
+    function slingAngleDegrees() {
+      if (!loadAttached()) return 0;
+      const anchor = slingHardpoint();
+      const dx = pallet.x - anchor.x;
+      const dy = pallet.y - anchor.y;
+      return Math.atan2(Math.abs(dx), Math.max(0.01, -dy)) * 180 / Math.PI;
+    }
+
+    function updateSling(dt) {
+      if (level.mission !== "sling") return;
+      if (!loadAttached()) {
+        if (cableLength < cableTargetLength) {
+          cableLength = Math.min(cableTargetLength, cableLength + CABLE_RATE * dt);
+        } else if (cableLength > cableTargetLength) {
+          cableLength = Math.max(cableTargetLength, cableLength - CABLE_RATE * dt);
+        }
+      } else {
+        cableLength = CABLE_MAX_LENGTH;
+        cableTargetLength = CABLE_MAX_LENGTH;
+      }
+
+      if (!pallet) return;
+      const anchor = slingHardpoint();
+
+      if (!loadAttached() && cableLength >= CABLE_MAX_LENGTH - 0.05) {
+        const hookY = anchor.y - cableLength;
+        const relativeSpeed = Math.hypot(
+          helicopter.vx - pallet.vx,
+          helicopter.vy - pallet.vy
+        );
+        if (Math.hypot(anchor.x - pallet.x, hookY - pallet.y) <= 1.25 &&
+            relativeSpeed <= 2) attachPallet();
+      }
+
+      if (loadAttached()) {
+        pallet.vx += -pallet.vx * 0.08 * dt;
+        pallet.vy += (-GRAVITY - pallet.vy * 0.05) * dt;
+        pallet.x += pallet.vx * dt;
+        pallet.y += pallet.vy * dt;
+
+        let dx = pallet.x - anchor.x;
+        let dy = pallet.y - anchor.y;
+        let distance = Math.hypot(dx, dy) || CABLE_MAX_LENGTH;
+        const nx = dx / distance;
+        const ny = dy / distance;
+        if (distance > CABLE_MAX_LENGTH) {
+          pallet.x = anchor.x + nx * CABLE_MAX_LENGTH;
+          pallet.y = anchor.y + ny * CABLE_MAX_LENGTH;
+          const relativeVx = pallet.vx - helicopter.vx;
+          const relativeVy = pallet.vy - helicopter.vy;
+          const radialSpeed = relativeVx * nx + relativeVy * ny;
+          if (radialSpeed > 0) {
+            pallet.vx -= radialSpeed * nx;
+            pallet.vy -= radialSpeed * ny;
+            const reaction = radialSpeed * LOAD_MASS_RATIO / (1 + LOAD_MASS_RATIO);
+            helicopter.vx += reaction * nx;
+            helicopter.vy += reaction * ny;
+          }
+        }
+      } else if (pallet.status === "free") {
+        pallet.vx += -pallet.vx * 0.08 * dt;
+        pallet.vy += (-GRAVITY - pallet.vy * 0.05) * dt;
+        pallet.x += pallet.vx * dt;
+        pallet.y += pallet.vy * dt;
+      }
+
+      if (palletHitsBuilding()) {
+        replacePallet();
+        return;
+      }
+
+      if (pallet.status === "attached" || pallet.status === "free") {
+        const surface = palletSurfaceY(pallet.x);
+        const bottom = pallet.y - PALLET_HEIGHT;
+        if (bottom <= surface) {
+          const overWater = surface === 0 && !Number.isFinite(solidHeightAt(pallet.x));
+          if (overWater || -pallet.vy > 2.5 || Math.abs(pallet.vx) > 4) {
+            replacePallet();
+          } else {
+            pallet.y = surface + PALLET_HEIGHT;
+            pallet.vx *= 0.65;
+            pallet.vy = 0;
+          }
+        }
+      }
+    }
+
+    function updateMission(dt) {
+      if (missionNoticeTimer > 0) {
+        missionNoticeTimer -= dt;
+        if (missionNoticeTimer <= 0) missionNotice = "";
+      }
+      if (level.mission === "scout" && !icebergScouted && !helicopter.landed) {
+        const heightAbovePeak = helicopter.y - SCOUT_PEAK_Y;
+        const inEnvelope = Math.abs(helicopter.x - SCOUT_X) <= SCOUT_RADIUS &&
+          heightAbovePeak >= 15 && heightAbovePeak <= 45 &&
+          Math.hypot(helicopter.vx, helicopter.vy) <= 3;
+        scoutTimer = inEnvelope ? scoutTimer + dt : 0;
+        if (scoutTimer >= SCOUT_TIME) {
+          scoutTimer = SCOUT_TIME;
+          icebergScouted = true;
+          setMissionNotice("ICEBERG SCOUTED — RETURN TO NUYINA");
+        }
+      }
+    }
+
+    function stepPhysics(dt) {
+      if (gameState !== "playing") return;
+
+      if (input.up !== input.down) {
+        helicopter.collective += (input.up ? 1 : -1) * COLLECTIVE_RATE * dt;
+        helicopter.collective = clamp(helicopter.collective, 0, 1);
+      }
+
+      if (helicopter.landed) {
+        helicopter.angle = 0;
+        helicopter.targetAngle = 0;
+        helicopter.angularVelocity = 0;
+      } else {
+        if (input.level) {
+          helicopter.targetAngle = 0;
+        } else if (input.right !== input.left) {
+          helicopter.targetAngle +=
+            (input.right ? 1 : -1) * CYCLIC_TARGET_RATE * dt;
+        }
+
+        if (helicopter.vx <= -DIRECTION_FLIP_SPEED) helicopter.facing = -1;
+        else if (helicopter.vx >= DIRECTION_FLIP_SPEED) helicopter.facing = 1;
+
+        const angularAcceleration =
+          (helicopter.targetAngle - helicopter.angle) * ATTITUDE_STIFFNESS -
+          helicopter.angularVelocity * ATTITUDE_DAMPING;
+        helicopter.angularVelocity += angularAcceleration * dt;
+        helicopter.angularVelocity = clamp(
+          helicopter.angularVelocity, -MAX_ANGULAR_RATE, MAX_ANGULAR_RATE
+        );
+        helicopter.angle += helicopter.angularVelocity * dt;
+      }
+
+      const massFactor = loadAttached() ? 1 + LOAD_MASS_RATIO : 1;
+      const liftAcceleration = helicopter.collective * MAX_LIFT_ACCEL / massFactor;
+      const verticalLift = liftAcceleration * Math.cos(helicopter.angle);
+      const horizontalLift = liftAcceleration * Math.sin(helicopter.angle);
+
+      if (helicopter.landed) {
+        helicopter.y = (helicopter.landedAt === STATION_PAD.name ?
+          STATION_PAD_Y : SHIP_DECK_Y) + SKID_DROP;
+        helicopter.vx = 0;
+        helicopter.vy = 0;
+        if (verticalLift > GRAVITY * 1.02) {
+          helicopter.landed = false;
+          helicopter.landedAt = "";
+          helicopter.vy = 0.08;
+        }
+      } else {
+        const dragX = HORIZONTAL_DRAG * helicopter.vx +
+          HORIZONTAL_QUADRATIC_DRAG * helicopter.vx * Math.abs(helicopter.vx);
+        const dragY = VERTICAL_DRAG * helicopter.vy +
+          VERTICAL_QUADRATIC_DRAG * helicopter.vy * Math.abs(helicopter.vy);
+        helicopter.vx += (horizontalLift - dragX) * dt;
+        helicopter.vy += (verticalLift - GRAVITY - dragY) * dt;
+        helicopter.vx = clamp(helicopter.vx, -MAX_HORIZONTAL_SPEED, MAX_HORIZONTAL_SPEED);
+        helicopter.vy = clamp(helicopter.vy, -MAX_VERTICAL_SPEED, MAX_VERTICAL_SPEED);
+        helicopter.x += helicopter.vx * dt;
+        helicopter.y += helicopter.vy * dt;
+        checkContact();
+      }
+
+      if (gameState === "playing") {
+        updateSling(dt);
+        updateMission(dt);
+      }
+      rotorPhase += (12 + helicopter.collective * 34) * dt;
+      elapsed += dt;
+      updateWash(dt);
+    }
+
+    function updateWash(dt) {
+      for (let i = washParticles.length - 1; i >= 0; i--) {
+        const p = washParticles[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= dt;
+        if (p.life <= 0) washParticles.splice(i, 1);
+      }
+
+      const floor = Math.max(0, solidHeightAt(helicopter.x));
+      const height = helicopter.y - floor;
+      if (!helicopter.landed && helicopter.collective > 0.38 && height < 25 &&
+          washParticles.length < 70 && Math.random() < helicopter.collective * 0.7) {
+        const direction = Math.random() < 0.5 ? -1 : 1;
+        washParticles.push({
+          x: helicopter.x + (Math.random() - 0.5) * 4,
+          y: floor + 0.2 + Math.random() * 0.8,
+          vx: direction * (8 + Math.random() * 12),
+          vy: 0.3 + Math.random() * 1.2,
+          life: 0.35 + Math.random() * 0.5,
+        });
+      }
+    }
+
+    function updateCamera(dt) {
+      const lead = clamp(helicopter.vx * 1.6, -100, 130);
+      const targetX = helicopter.x + lead;
+      const targetY = Math.max(30, helicopter.y + clamp(helicopter.vy * 0.4, -8, 10));
+      const blend = 1 - Math.exp(-dt * 2.5);
+      cameraX = lerp(cameraX, targetX, blend);
+      cameraY = lerp(cameraY, targetY, blend);
+    }
+
+    function worldToScreenX(x) {
+      return (x - cameraX) * PIXELS_PER_METRE + viewWidth * 0.46;
+    }
+
+    function worldToScreenY(y) {
+      return viewHeight * 0.46 - (y - cameraY) * PIXELS_PER_METRE;
+    }
+
+    function drawSky() {
+      const gradient = ctx.createLinearGradient(0, 0, 0, viewHeight);
+      gradient.addColorStop(0, "#071b2d");
+      gradient.addColorStop(0.48, "#426f88");
+      gradient.addColorStop(0.82, "#b2ced5");
+      gradient.addColorStop(1, "#d9e8e9");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, viewWidth, viewHeight);
+
+      ctx.fillStyle = "rgba(226, 241, 243, 0.25)";
+      ctx.beginPath();
+      ctx.ellipse(viewWidth * 0.78, viewHeight * 0.16, 65, 65, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      drawCloud(viewWidth * 0.17 - cameraX * 0.018, 90, 1.05);
+      drawCloud(viewWidth * 0.72 - cameraX * 0.011, 150, 0.75);
+      drawCloud(viewWidth * 1.08 - cameraX * 0.015, 75, 0.9);
+    }
+
+    function drawCloud(x, y, scale) {
+      x = ((x % (viewWidth + 400)) + viewWidth + 400) % (viewWidth + 400) - 200;
+      ctx.fillStyle = "rgba(218, 233, 237, 0.14)";
+      ctx.beginPath();
+      ctx.ellipse(x, y, 85 * scale, 22 * scale, 0, 0, Math.PI * 2);
+      ctx.ellipse(x - 48 * scale, y + 5, 55 * scale, 17 * scale, 0, 0, Math.PI * 2);
+      ctx.ellipse(x + 58 * scale, y + 6, 65 * scale, 16 * scale, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawMountains() {
+      const seaY = worldToScreenY(0);
+      const offset = -((cameraX * 0.13) % 720);
+      ctx.fillStyle = "#6d8d9b";
+      ctx.beginPath();
+      ctx.moveTo(0, seaY);
+      for (let i = -2; i < Math.ceil(viewWidth / 180) + 3; i++) {
+        const x = offset + i * 180;
+        const peak = seaY - 90 - ((i * 47) % 75 + 75) % 75;
+        ctx.lineTo(x, seaY);
+        ctx.lineTo(x + 92, peak);
+        ctx.lineTo(x + 180, seaY);
+      }
+      ctx.lineTo(viewWidth, seaY);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "rgba(219, 235, 237, 0.78)";
+      ctx.beginPath();
+      ctx.moveTo(0, seaY);
+      for (let i = -2; i < Math.ceil(viewWidth / 180) + 3; i++) {
+        const x = offset + i * 180;
+        const peak = seaY - 90 - ((i * 47) % 75 + 75) % 75;
+        ctx.lineTo(x + 63, peak + 45);
+        ctx.lineTo(x + 92, peak);
+        ctx.lineTo(x + 121, peak + 49);
+      }
+      ctx.lineTo(viewWidth, seaY);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawWater() {
+      const seaY = worldToScreenY(0);
+      const gradient = ctx.createLinearGradient(0, seaY, 0, viewHeight);
+      gradient.addColorStop(0, "#1d6177");
+      gradient.addColorStop(1, "#052f47");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, seaY, viewWidth, viewHeight - seaY);
+
+      ctx.lineWidth = 1.2;
+      for (let row = 0; row < 8; row++) {
+        const y = seaY + 8 + row * 19;
+        ctx.strokeStyle = "rgba(183, 225, 229," + (0.24 - row * 0.015) + ")";
+        ctx.beginPath();
+        const phase = elapsed * (0.8 + row * 0.05) + row;
+        for (let x = -20; x <= viewWidth + 20; x += 12) {
+          const waveY = y + Math.sin(x * 0.032 + phase) * (1.5 + row * 0.12);
+          if (x === -20) ctx.moveTo(x, waveY);
+          else ctx.lineTo(x, waveY);
+        }
+        ctx.stroke();
+      }
+    }
+
+    function drawIce() {
+      if (!level.station) return;
+      const startX = worldToScreenX(1570);
+      if (startX > viewWidth + 100) return;
+      ctx.beginPath();
+      ctx.moveTo(startX, viewHeight);
+      for (let x = 1570; x <= WORLD_MAX_X + 200; x += 8) {
+        ctx.lineTo(worldToScreenX(x), worldToScreenY(iceHeightAt(x)));
+      }
+      ctx.lineTo(worldToScreenX(WORLD_MAX_X + 200), viewHeight);
+      ctx.closePath();
+      const gradient = ctx.createLinearGradient(0, worldToScreenY(7), 0, viewHeight);
+      gradient.addColorStop(0, "#edf7f5");
+      gradient.addColorStop(0.18, "#b9d8d8");
+      gradient.addColorStop(1, "#789fa9");
+      ctx.fillStyle = gradient;
+      ctx.fill();
+
+      ctx.strokeStyle = "#f7ffff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let x = 1570; x <= WORLD_MAX_X + 200; x += 8) {
+        const sx = worldToScreenX(x);
+        const sy = worldToScreenY(iceHeightAt(x));
+        if (x === 1570) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+      }
+      ctx.stroke();
+    }
+
+    function drawIceberg() {
+      if (level.mission !== "scout") return;
+      const points = [
+        [555, 0], [580, 8], [610, 18], [636, 31],
+        [650, SCOUT_PEAK_Y], [672, 24], [705, 13], [745, 0],
+      ];
+      const gradient = ctx.createLinearGradient(
+        0, worldToScreenY(SCOUT_PEAK_Y), 0, worldToScreenY(-10)
+      );
+      gradient.addColorStop(0, "#f6ffff");
+      gradient.addColorStop(0.45, "#b9dce1");
+      gradient.addColorStop(1, "#4f92a8");
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.moveTo(worldToScreenX(points[0][0]), worldToScreenY(-12));
+      for (const point of points) {
+        ctx.lineTo(worldToScreenX(point[0]), worldToScreenY(point[1]));
+      }
+      ctx.lineTo(worldToScreenX(725), worldToScreenY(-10));
+      ctx.lineTo(worldToScreenX(585), worldToScreenY(-12));
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(244,255,255,0.9)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let i = 0; i < points.length; i++) {
+        const x = worldToScreenX(points[i][0]);
+        const y = worldToScreenY(points[i][1]);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      if (!icebergScouted) {
+        const left = worldToScreenX(SCOUT_X - SCOUT_RADIUS);
+        const right = worldToScreenX(SCOUT_X + SCOUT_RADIUS);
+        const top = worldToScreenY(SCOUT_PEAK_Y + 45);
+        const bottom = worldToScreenY(SCOUT_PEAK_Y + 15);
+        ctx.save();
+        ctx.setLineDash([9, 7]);
+        ctx.strokeStyle = "rgba(67,213,205,0.85)";
+        ctx.fillStyle = "rgba(67,213,205,0.08)";
+        ctx.lineWidth = 2;
+        ctx.fillRect(left, top, right - left, bottom - top);
+        ctx.strokeRect(left, top, right - left, bottom - top);
+        ctx.restore();
+      }
+    }
+
+    function drawNuyina() {
+      const x = worldToScreenX(-130);
+      const y = worldToScreenY(0);
+      const s = PIXELS_PER_METRE;
+      ctx.save();
+      ctx.translate(x, y);
+
+      ctx.fillStyle = "#182933";
+      ctx.beginPath();
+      ctx.moveTo(0, -8 * s);
+      ctx.lineTo(66 * s, -11 * s);
+      ctx.lineTo(194 * s, -11 * s);
+      ctx.lineTo(326 * s, -8 * s);
+      ctx.lineTo(306 * s, 3 * s);
+      ctx.lineTo(43 * s, 5 * s);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#ef5a25";
+      ctx.beginPath();
+      ctx.moveTo(0, -8 * s);
+      ctx.lineTo(326 * s, -8 * s);
+      ctx.lineTo(306 * s, -1 * s);
+      ctx.lineTo(50 * s, 1 * s);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#f2f3e9";
+      ctx.fillRect(75 * s, -18 * s, 132 * s, 7 * s);
+      ctx.fillRect(78 * s, -30 * s, 98 * s, 12 * s);
+      ctx.fillRect(88 * s, -39 * s, 70 * s, 9 * s);
+      ctx.fillStyle = "#153447";
+      for (let i = 0; i < 7; i++) ctx.fillRect((94 + i * 9) * s, -36 * s, 6 * s, 3 * s);
+
+      ctx.strokeStyle = "#d8e4e2";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(125 * s, -39 * s);
+      ctx.lineTo(125 * s, -53 * s);
+      ctx.lineTo(115 * s, -53 * s);
+      ctx.moveTo(125 * s, -49 * s);
+      ctx.lineTo(138 * s, -45 * s);
+      ctx.stroke();
+
+      const deckX = (SHIP_DECK.x1 + 130) * s;
+      const deckW = (SHIP_DECK.x2 - SHIP_DECK.x1) * s;
+      ctx.fillStyle = "#31535c";
+      ctx.fillRect(deckX, -SHIP_DECK_Y * s, deckW, 2 * s);
+      ctx.strokeStyle = "#f4d84a";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(deckX + 2, -SHIP_DECK_Y * s - 1, deckW - 4, 5);
+      ctx.fillStyle = "#f4d84a";
+      ctx.font = "bold 18px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("H", deckX + deckW / 2, -SHIP_DECK_Y * s + 18);
+
+      ctx.save();
+      ctx.translate(132 * s, -5 * s);
+      ctx.rotate(Math.PI);
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 5px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("RSV NUYINA", 0, 0);
+      ctx.restore();
+      ctx.restore();
+    }
+
+    function drawStation() {
+      if (!level.station) return;
+      const padX = worldToScreenX(STATION_PAD.x1);
+      const padY = worldToScreenY(STATION_PAD.y);
+      const padWidth = (STATION_PAD.x2 - STATION_PAD.x1) * PIXELS_PER_METRE;
+
+      ctx.fillStyle = "#394c50";
+      ctx.fillRect(padX, padY, padWidth, 7);
+      ctx.strokeStyle = "#ffd84a";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(padX + 3, padY - 1, padWidth - 6, 6);
+      ctx.fillStyle = "#ffd84a";
+      ctx.font = "bold 24px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("H", padX + padWidth / 2, padY - 8);
+
+      for (let i = 0; i < BUILDINGS.length; i++) {
+        const b = BUILDINGS[i];
+        const x = worldToScreenX(b.x1);
+        const y = worldToScreenY(b.y2);
+        const w = (b.x2 - b.x1) * PIXELS_PER_METRE;
+        const h = (b.y2 - b.y1) * PIXELS_PER_METRE;
+        ctx.fillStyle = i === 1 ? "#e95b2c" : "#d84a2a";
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = "#f1e8c9";
+        for (let wx = 10; wx < w - 6; wx += 24) {
+          ctx.fillRect(x + wx, y + 18, 9, 10);
+        }
+        ctx.fillStyle = "rgba(255,255,255,0.72)";
+        ctx.beginPath();
+        ctx.moveTo(x - 5, y);
+        ctx.lineTo(x + w / 2, y - 15);
+        ctx.lineTo(x + w + 5, y);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      const tower = BUILDINGS[2];
+      const tx = worldToScreenX((tower.x1 + tower.x2) / 2);
+      const ty = worldToScreenY(tower.y2);
+      ctx.strokeStyle = "#e7ece4";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(tx, ty - 45);
+      ctx.moveTo(tx - 16, ty - 25);
+      ctx.lineTo(tx + 16, ty - 25);
+      ctx.stroke();
+
+      ctx.fillStyle = "rgba(7, 25, 40, 0.7)";
+      ctx.font = "bold 15px Trebuchet MS";
+      ctx.textAlign = "center";
+      ctx.fillText("AURORA STATION", worldToScreenX(1950), worldToScreenY(42));
+
+      if (level.mission === "sling") {
+        const ground = cargoGroundY();
+        const x1 = worldToScreenX(CARGO_ZONE.x1);
+        const x2 = worldToScreenX(CARGO_ZONE.x2);
+        const y = worldToScreenY(ground);
+        ctx.fillStyle = "rgba(255,216,74,0.18)";
+        ctx.fillRect(x1, y - 5, x2 - x1, 10);
+        ctx.strokeStyle = "#ffd84a";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 6]);
+        ctx.strokeRect(x1, y - 6, x2 - x1, 12);
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#ffd84a";
+        ctx.font = "bold 12px Trebuchet MS";
+        ctx.fillText("CARGO", (x1 + x2) / 2, y - 13);
+      }
+
+      if (level.mission === "passengers" && passengersAboard === 0) {
+        for (let i = 0; i < 6; i++) {
+          drawExpeditioner(1882 + i * 4.5, STATION_PAD_Y + 0.2, i % 2);
+        }
+      }
+    }
+
+    function drawExpeditioner(x, groundY, variant) {
+      const sx = worldToScreenX(x);
+      const sy = worldToScreenY(groundY);
+      ctx.fillStyle = variant ? "#f2c94c" : "#ef5b2b";
+      ctx.beginPath();
+      ctx.arc(sx, sy - 10, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillRect(sx - 3, sy - 7, 6, 9);
+      ctx.strokeStyle = "#243740";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(sx - 1.5, sy + 1);
+      ctx.lineTo(sx - 2.5, sy + 6);
+      ctx.moveTo(sx + 1.5, sy + 1);
+      ctx.lineTo(sx + 2.5, sy + 6);
+      ctx.stroke();
+    }
+
+    function drawCagePallet(item, delivered) {
+      if (!item) return;
+      const left = worldToScreenX(item.x - PALLET_WIDTH / 2);
+      const top = worldToScreenY(item.y);
+      const width = PALLET_WIDTH * PIXELS_PER_METRE;
+      const height = PALLET_HEIGHT * PIXELS_PER_METRE;
+      ctx.fillStyle = delivered ? "rgba(208,164,83,0.9)" : "#bd8746";
+      ctx.fillRect(left, top, width, height);
+      ctx.strokeStyle = "#39454a";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(left, top, width, height);
+      ctx.beginPath();
+      ctx.moveTo(left, top);
+      ctx.lineTo(left + width, top + height);
+      ctx.moveTo(left + width, top);
+      ctx.lineTo(left, top + height);
+      ctx.moveTo(left + width / 2, top);
+      ctx.lineTo(left + width / 2, top + height);
+      ctx.stroke();
+      ctx.fillStyle = "#704b2e";
+      ctx.fillRect(left - 2, top + height, width + 4, 3);
+    }
+
+    function drawSling() {
+      if (level.mission !== "sling") return;
+      for (const delivered of deliveredPallets) drawCagePallet(delivered, true);
+      if (pallet) drawCagePallet(pallet, false);
+      if (cableLength <= 0.02) return;
+      const anchor = slingHardpoint();
+      const endX = loadAttached() ? pallet.x : anchor.x;
+      const endY = loadAttached() ? pallet.y : anchor.y - cableLength;
+      ctx.strokeStyle = "#202b2f";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(worldToScreenX(anchor.x), worldToScreenY(anchor.y));
+      ctx.lineTo(worldToScreenX(endX), worldToScreenY(endY));
+      ctx.stroke();
+      if (!loadAttached()) {
+        ctx.fillStyle = "#f2d04d";
+        ctx.beginPath();
+        ctx.arc(worldToScreenX(endX), worldToScreenY(endY), 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawWash() {
+      ctx.lineCap = "round";
+      for (const particle of washParticles) {
+        const alpha = clamp(particle.life * 1.6, 0, 0.5);
+        ctx.strokeStyle = "rgba(225,244,245," + alpha + ")";
+        ctx.lineWidth = 1.5;
+        const x = worldToScreenX(particle.x);
+        const y = worldToScreenY(particle.y);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x - particle.vx * 0.8, y + 1);
+        ctx.stroke();
+      }
+      ctx.lineCap = "butt";
+    }
+
+    function drawShadow() {
+      const floor = Math.max(0, solidHeightAt(helicopter.x));
+      const height = helicopter.y - floor;
+      if (height < 0 || height > 80) return;
+      const alpha = clamp(0.32 - height / 280, 0.04, 0.3);
+      const width = 54 + height * 0.7;
+      ctx.fillStyle = "rgba(4,18,25," + alpha + ")";
+      ctx.beginPath();
+      ctx.ellipse(
+        worldToScreenX(helicopter.x),
+        worldToScreenY(floor) + 2,
+        width,
+        6 + height * 0.05,
+        0, 0, Math.PI * 2
+      );
+      ctx.fill();
+    }
+
+    function drawHelicopter() {
+      const x = worldToScreenX(helicopter.x);
+      const y = worldToScreenY(helicopter.y);
+      const s = PIXELS_PER_METRE;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(helicopter.angle);
+      ctx.scale(s * helicopter.facing, s);
+
+      ctx.strokeStyle = "#17272e";
+      ctx.lineWidth = 0.25;
+      ctx.lineCap = "round";
+
+      // Skids and struts
+      ctx.beginPath();
+      ctx.moveTo(-3.2, 2.15);
+      ctx.lineTo(3.35, 2.15);
+      ctx.quadraticCurveTo(3.8, 2.15, 4, 1.85);
+      ctx.moveTo(-2.35, 2.1);
+      ctx.lineTo(-1.8, 1.1);
+      ctx.moveTo(2.1, 2.1);
+      ctx.lineTo(1.7, 1.15);
+      ctx.stroke();
+
+      // Tail boom and stabiliser
+      ctx.fillStyle = "#e74e24";
+      ctx.beginPath();
+      ctx.moveTo(-1.8, -0.5);
+      ctx.lineTo(-7.4, -1.05);
+      ctx.lineTo(-7.15, 0.15);
+      ctx.lineTo(-1.5, 0.75);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#f15a29";
+      ctx.beginPath();
+      ctx.moveTo(-6.9, -0.8);
+      ctx.lineTo(-6.35, -3.0);
+      ctx.lineTo(-5.75, -2.9);
+      ctx.lineTo(-6.0, -0.65);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-5.9, -0.65);
+      ctx.lineTo(-4.7, -1.45);
+      ctx.lineTo(-4.45, -1.15);
+      ctx.lineTo(-5.4, -0.35);
+      ctx.closePath();
+      ctx.fill();
+
+      // Cabin and engine cowling
+      ctx.fillStyle = "#ef5b2b";
+      ctx.beginPath();
+      ctx.moveTo(-2.2, 0.9);
+      ctx.quadraticCurveTo(-2.45, -1.5, -0.7, -2.0);
+      ctx.lineTo(2.0, -1.85);
+      ctx.quadraticCurveTo(4.35, -1.3, 4.65, 0.05);
+      ctx.quadraticCurveTo(4.35, 1.15, 2.65, 1.45);
+      ctx.lineTo(-0.9, 1.4);
+      ctx.quadraticCurveTo(-1.7, 1.35, -2.2, 0.9);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // AS350-style windows
+      ctx.fillStyle = "#75c1d4";
+      ctx.beginPath();
+      ctx.moveTo(1.1, -1.55);
+      ctx.lineTo(2.1, -1.42);
+      ctx.quadraticCurveTo(3.65, -1.05, 4.15, -0.15);
+      ctx.lineTo(1.15, -0.15);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-0.55, -1.65);
+      ctx.lineTo(0.75, -1.6);
+      ctx.lineTo(0.8, -0.15);
+      ctx.lineTo(-0.55, -0.15);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "#d9f0f2";
+      ctx.lineWidth = 0.12;
+      ctx.stroke();
+
+      ctx.fillStyle = "#1e3440";
+      ctx.fillRect(-0.8, 0.05, 0.16, 1.05);
+      ctx.fillRect(0.86, -1.55, 0.12, 2.65);
+      ctx.fillStyle = "#f2d33c";
+      ctx.fillRect(-2.0, 0.85, 5.8, 0.28);
+
+      // Mast and rotor
+      ctx.strokeStyle = "#25363a";
+      ctx.lineWidth = 0.22;
+      ctx.beginPath();
+      ctx.moveTo(0, -1.9);
+      ctx.lineTo(0, -2.75);
+      ctx.stroke();
+      const rotorWidth = 6.8 + Math.abs(Math.sin(rotorPhase)) * 2.1;
+      ctx.strokeStyle = "rgba(25,37,40,0.85)";
+      ctx.lineWidth = 0.16;
+      ctx.beginPath();
+      ctx.moveTo(-rotorWidth, -2.75);
+      ctx.lineTo(rotorWidth, -2.75);
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(218,232,229,0.33)";
+      ctx.lineWidth = 0.32;
+      ctx.beginPath();
+      ctx.moveTo(-rotorWidth * 0.9, -2.8);
+      ctx.lineTo(rotorWidth * 0.9, -2.8);
+      ctx.stroke();
+
+      // Tail rotor
+      ctx.translate(-7.05, -0.8);
+      ctx.rotate(rotorPhase * 1.8);
+      ctx.strokeStyle = "#f3df7b";
+      ctx.lineWidth = 0.18;
+      for (let i = 0; i < 3; i++) {
+        ctx.rotate(Math.PI * 2 / 3);
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(0, -1.05);
+        ctx.stroke();
+      }
+      ctx.fillStyle = "#26373c";
+      ctx.beginPath();
+      ctx.arc(0, 0, 0.18, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+      ctx.lineCap = "butt";
+    }
+
+    function updateAndDrawSnow(realDt) {
+      ctx.fillStyle = "#fff";
+      for (const flake of snow) {
+        flake.x += flake.drift * realDt;
+        flake.y += flake.speed * realDt;
+        if (flake.y > viewHeight + 4) {
+          flake.y = -4;
+          flake.x = Math.random() * viewWidth;
+        }
+        if (flake.x > viewWidth + 4) flake.x = -4;
+        ctx.globalAlpha = flake.alpha;
+        ctx.beginPath();
+        ctx.arc(flake.x, flake.y, flake.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawWorld(realDt) {
+      drawSky();
+      drawMountains();
+      drawWater();
+      drawIce();
+      drawIceberg();
+      drawNuyina();
+      drawStation();
+      drawWash();
+      drawShadow();
+      drawSling();
+      drawHelicopter();
+      updateAndDrawSnow(realDt);
+    }
+
+    function drawRoundedPanel(x, y, width, height, radius, fill) {
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.roundRect(x, y, width, height, radius);
+      ctx.fill();
+    }
+
+    function objectiveText() {
+      if (level.mission === "scout") {
+        return icebergScouted ?
+          "Return to Nuyina and land" :
+          "Hold a close hover at the iceberg — " + scoutTimer.toFixed(1) + " / 4.0 s";
+      }
+      if (level.mission === "passengers") {
+        return "Deliver " + passengersAboard + " expeditioners to Aurora Station";
+      }
+      if (deliveries >= 3) return "Return to Nuyina and land";
+      if (loadAttached()) return "Place cage " + (deliveries + 1) + " in the station cargo zone";
+      return "Pick up cage " + (deliveries + 1) + " of 3";
+    }
+
+    function activeObjective() {
+      if (level.mission === "scout") {
+        return icebergScouted ?
+          { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: SHIP_DECK.y } :
+          { x: SCOUT_X, y: SCOUT_PEAK_Y + 28 };
+      }
+      if (level.mission === "passengers") {
+        return { x: (STATION_PAD.x1 + STATION_PAD.x2) / 2, y: STATION_PAD.y };
+      }
+      if (deliveries >= 3) {
+        return { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: SHIP_DECK.y };
+      }
+      if (loadAttached()) {
+        return {
+          x: (CARGO_ZONE.x1 + CARGO_ZONE.x2) / 2,
+          y: cargoGroundY(),
+        };
+      }
+      return pallet ?
+        { x: pallet.x, y: pallet.y } :
+        { x: PALLET_PICKUP_X, y: SHIP_DECK_Y + PALLET_HEIGHT };
+    }
+
+    function drawObjectivePointer() {
+      if (gameState !== "playing") return;
+      const target = activeObjective();
+      if (!target) return;
+      const sx = worldToScreenX(target.x);
+      const sy = worldToScreenY(target.y);
+      const margin = 56;
+      if (sx > margin && sx < viewWidth - margin &&
+          sy > margin && sy < viewHeight - margin) return;
+
+      const centreX = viewWidth / 2;
+      const centreY = viewHeight / 2;
+      const dx = sx - centreX;
+      const dy = sy - centreY;
+      const scale = Math.min(
+        (centreX - margin) / Math.abs(dx || 1e-9),
+        (centreY - margin) / Math.abs(dy || 1e-9)
+      );
+      const edgeX = centreX + dx * scale;
+      const edgeY = centreY + dy * scale;
+      ctx.save();
+      ctx.translate(edgeX, edgeY);
+      ctx.rotate(Math.atan2(dy, dx));
+      ctx.fillStyle = "#ffd400";
+      ctx.beginPath();
+      ctx.moveTo(12, 0);
+      ctx.lineTo(-6, -9);
+      ctx.lineTo(-6, 9);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      const distance = Math.hypot(target.x - helicopter.x, target.y - helicopter.y);
+      const label = formatObjectiveDistance(distance);
+      ctx.font = "bold 14px Trebuchet MS";
+      ctx.fillStyle = "#ffd400";
+      ctx.textAlign = "center";
+      ctx.fillText(label, edgeX, edgeY + 26);
+    }
+
+    function formatObjectiveDistance(distance) {
+      return distance >= 1000 ?
+        (distance / 1000).toFixed(1) + " km" :
+        Math.round(distance) + " m";
+    }
+
+    function drawHUD() {
+      if (gameState !== "playing" && gameState !== "crashed") return;
+      const panelWidth = Math.min(390, viewWidth - 24);
+      drawRoundedPanel(12, 12, panelWidth, 82, 9, "rgba(5,20,29,0.78)");
+
+      ctx.textAlign = "left";
+      ctx.fillStyle = "#d8edf0";
+      ctx.font = "bold 12px Trebuchet MS";
+      ctx.fillText("COLLECTIVE", 27, 34);
+      ctx.fillStyle = "rgba(255,255,255,0.15)";
+      ctx.fillRect(27, 43, 130, 12);
+      const collectiveColour = helicopter.collective > 0.8 ? "#f6a23a" : "#43c4b4";
+      ctx.fillStyle = collectiveColour;
+      ctx.fillRect(27, 43, 130 * helicopter.collective, 12);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 14px Trebuchet MS";
+      ctx.fillText(Math.round(helicopter.collective * 100) + "%", 166, 54);
+
+      ctx.fillStyle = "#d8edf0";
+      ctx.font = "bold 12px Trebuchet MS";
+      ctx.fillText("TILT", 220, 34);
+      ctx.fillStyle = "#fff";
+      const tiltDirection = helicopter.angle > 0.01 ? "R " : helicopter.angle < -0.01 ? "L " : "";
+      ctx.fillText(tiltDirection + Math.abs(helicopter.angle * 180 / Math.PI).toFixed(0) + "°", 220, 54);
+      ctx.fillStyle = "#d8edf0";
+      ctx.fillText("SPEED", 294, 34);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(Math.abs(helicopter.vx).toFixed(0) + " m/s", 294, 54);
+
+      ctx.fillStyle = "#b9d8dc";
+      ctx.font = "12px Trebuchet MS";
+      const vertical = helicopter.vy >= 0 ? "↑" : "↓";
+      ctx.fillText("ALT " + Math.max(0, helicopter.y).toFixed(0) + " m", 27, 78);
+      ctx.fillText("V/S " + vertical + " " + Math.abs(helicopter.vy).toFixed(1) + " m/s", 118, 78);
+
+      const objectiveWidth = Math.min(520, viewWidth - 24);
+      drawRoundedPanel(12, 104, objectiveWidth, level.mission === "sling" ? 84 : 48, 8,
+        "rgba(5,20,29,0.78)");
+      ctx.textAlign = "left";
+      ctx.fillStyle = "#ffd65a";
+      ctx.font = "bold 12px Trebuchet MS";
+      ctx.fillText("LEVEL " + level.number + " — " + level.name.toUpperCase(), 25, 123);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 14px Trebuchet MS";
+      ctx.fillText(objectiveText(), 25, 146);
+
+      if (level.mission === "sling") {
+        const cableState = loadAttached() ? "ATTACHED" :
+          cableLength < 0.05 ? "STOWED" :
+          cableTargetLength > cableLength ? "LOWERING" :
+          cableTargetLength === 0 ? "RETRACTING" : "DEPLOYED";
+        ctx.fillStyle = "#9ed5d8";
+        ctx.font = "12px Trebuchet MS";
+        ctx.fillText(
+          "CABLE " + cableState + "   ·   DELIVERED " + deliveries + " / 3   ·   E: LINE / RELEASE",
+          25, 165
+        );
+        const swing = slingAngleDegrees();
+        ctx.fillStyle = swing > 25 ? "#ff8b65" : "#9ed5d8";
+        ctx.font = swing > 25 ? "bold 12px Trebuchet MS" : "12px Trebuchet MS";
+        ctx.fillText(
+          swing > 25 ?
+            "LOAD SWING " + swing.toFixed(0) + "° — SLOW DOWN" :
+            "LOAD SWING " + swing.toFixed(0) + "°",
+          25, 183
+        );
+      }
+
+      if (missionNotice) {
+        const noticeWidth = Math.min(480, viewWidth - 30);
+        drawRoundedPanel(
+          viewWidth / 2 - noticeWidth / 2, 205, noticeWidth, 38, 7,
+          "rgba(7,27,41,0.9)"
+        );
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#ffd65a";
+        ctx.font = "bold 15px Trebuchet MS";
+        ctx.fillText(missionNotice, viewWidth / 2, 229);
+      }
+
+      if (helicopter.landed) {
+        const statusWidth = Math.min(320, viewWidth - 24);
+        drawRoundedPanel(
+          viewWidth / 2 - statusWidth / 2, viewHeight - 54,
+          statusWidth, 38, 8, "rgba(5,20,29,0.82)"
+        );
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#8ce0d4";
+        ctx.font = "bold 14px Trebuchet MS";
+        ctx.fillText("LANDED — " + helicopter.landedAt, viewWidth / 2, viewHeight - 30);
+      }
+
+      ctx.textAlign = "right";
+      ctx.fillStyle = "rgba(230,244,245,0.8)";
+      ctx.font = "12px Trebuchet MS";
+      ctx.fillText(
+        "← → / A D  TILT     ↑ ↓ / W S  COLLECTIVE     SPACE LEVEL" +
+          (level.mission === "sling" ? "     E LOAD LINE" : ""),
+        viewWidth - 16, 28
+      );
+    }
+
+    function drawTitle() {
+      ctx.fillStyle = "rgba(3,16,25,0.52)";
+      ctx.fillRect(0, 0, viewWidth, viewHeight);
+      const width = Math.min(650, viewWidth - 36);
+      const height = Math.min(350, viewHeight - 50);
+      const x = (viewWidth - width) / 2;
+      const y = (viewHeight - height) / 2;
+      drawRoundedPanel(x, y, width, height, 16, "rgba(7,27,41,0.92)");
+      ctx.strokeStyle = "rgba(137,207,211,0.5)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 8, y + 8, width - 16, height - 16);
+
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#f15a29";
+      ctx.font = "bold " + clamp(viewWidth * 0.058, 38, 66) + "px Trebuchet MS";
+      ctx.fillText("POLAR PILOT", viewWidth / 2, y + 90);
+      ctx.fillStyle = "#cde7e9";
+      ctx.font = "bold 17px Trebuchet MS";
+      ctx.fillText("THREE ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
+
+      ctx.fillStyle = "#fff";
+      ctx.font = "16px Trebuchet MS";
+      ctx.fillText("Scout ice, carry expeditioners, and fly sling loads", viewWidth / 2, y + 172);
+      ctx.fillStyle = "#9ed5d8";
+      ctx.fillText("LEFT / RIGHT · A / D", viewWidth / 2 - 136, y + 215);
+      ctx.fillText("UP / DOWN · W / S", viewWidth / 2 + 136, y + 215);
+      ctx.fillStyle = "#fff";
+      ctx.font = "14px Trebuchet MS";
+      ctx.fillText("set and hold angle", viewWidth / 2 - 136, y + 238);
+      ctx.fillText("set collective", viewWidth / 2 + 136, y + 238);
+      ctx.fillStyle = "#ffd65a";
+      ctx.font = "bold 15px Trebuchet MS";
+      ctx.fillText("HOLD SPACE TO LEVEL", viewWidth / 2, y + 273);
+      ctx.font = "bold 20px Trebuchet MS";
+      ctx.fillText("PRESS SPACE TO FLY", viewWidth / 2, y + 310);
+      ctx.fillStyle = "#9ed5d8";
+      ctx.font = "bold 12px Trebuchet MS";
+      ctx.fillText("1–3: JUMP TO LEVEL", viewWidth / 2, y + 335);
+    }
+
+    function drawBriefing() {
+      drawMissionPanel(
+        "LEVEL " + level.number + " — " + level.name.toUpperCase(),
+        level.brief,
+        level.mission === "sling" ?
+          "E deploys or retracts the line and releases an attached cage." :
+          "Follow the yellow objective chevron.",
+        "PRESS SPACE TO BEGIN"
+      );
+    }
+
+    function drawLevelComplete() {
+      let message = "Mission complete.";
+      if (level.mission === "scout") message = "Iceberg inspected and aircraft safely back aboard.";
+      else if (level.mission === "passengers") message = "All six expeditioners are safely ashore.";
+      else if (level.mission === "sling") message = "Three cages delivered and aircraft returned to Nuyina.";
+      drawMissionPanel(
+        "MISSION COMPLETE",
+        message,
+        levelIndex < LEVELS.length - 1 ? "The next task is ready." : "All assigned flights are complete.",
+        levelIndex < LEVELS.length - 1 ? "PRESS SPACE FOR NEXT LEVEL" : "PRESS SPACE TO CONTINUE"
+      );
+    }
+
+    function drawGameComplete() {
+      drawMissionPanel(
+        "TOUR COMPLETE",
+        "Ice scouted, expeditioners delivered, and station cargo safely ashore.",
+        "Excellent flying.",
+        "PRESS SPACE FOR TITLE"
+      );
+    }
+
+    function drawMissionPanel(title, body, secondary, footer) {
+      ctx.fillStyle = "rgba(3,16,25,0.62)";
+      ctx.fillRect(0, 0, viewWidth, viewHeight);
+      const width = Math.min(680, viewWidth - 32);
+      const height = 300;
+      const x = (viewWidth - width) / 2;
+      const y = (viewHeight - height) / 2;
+      drawRoundedPanel(x, y, width, height, 15, "rgba(7,27,41,0.95)");
+      ctx.strokeStyle = "rgba(137,207,211,0.55)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 8, y + 8, width - 16, height - 16);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#f15a29";
+      ctx.font = "bold 34px Trebuchet MS";
+      ctx.fillText(title, viewWidth / 2, y + 64);
+      ctx.fillStyle = "#fff";
+      ctx.font = "17px Trebuchet MS";
+      const bodyLines = wrapText(body, width - 80);
+      for (let i = 0; i < bodyLines.length; i++) {
+        ctx.fillText(bodyLines[i], viewWidth / 2, y + 112 + i * 23);
+      }
+      ctx.fillStyle = "#a9dadd";
+      ctx.font = "15px Trebuchet MS";
+      ctx.fillText(secondary, viewWidth / 2, y + 194);
+      ctx.fillStyle = "#ffd65a";
+      ctx.font = "bold 19px Trebuchet MS";
+      ctx.fillText(footer, viewWidth / 2, y + 252);
+    }
+
+    function drawCrash() {
+      ctx.fillStyle = "rgba(29,8,11,0.62)";
+      ctx.fillRect(0, 0, viewWidth, viewHeight);
+      const width = Math.min(600, viewWidth - 32);
+      const x = (viewWidth - width) / 2;
+      const y = viewHeight / 2 - 115;
+      drawRoundedPanel(x, y, width, 230, 14, "rgba(75,17,24,0.94)");
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#ffb05f";
+      ctx.font = "bold 42px Trebuchet MS";
+      ctx.fillText("AIRCRAFT DOWN", viewWidth / 2, y + 66);
+      ctx.fillStyle = "#fff";
+      ctx.font = "16px Trebuchet MS";
+      const lines = wrapText(crashReason, width - 70);
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], viewWidth / 2, y + 108 + i * 22);
+      }
+      ctx.fillStyle = "#ffd65a";
+      ctx.font = "bold 19px Trebuchet MS";
+      ctx.fillText("PRESS SPACE TO RESTART", viewWidth / 2, y + 190);
+    }
+
+    function wrapText(text, maxWidth) {
+      const words = text.split(" ");
+      const lines = [];
+      let line = "";
+      for (const word of words) {
+        const test = line ? line + " " + word : word;
+        if (ctx.measureText(test).width > maxWidth && line) {
+          lines.push(line);
+          line = word;
+        } else {
+          line = test;
+        }
+      }
+      if (line) lines.push(line);
+      return lines;
+    }
+
+    function onKey(event, pressed) {
+      const code = event.code;
+      if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+           "KeyA", "KeyD", "KeyW", "KeyS", "KeyE", "Space",
+           "Digit1", "Digit2", "Digit3"].includes(code)) {
+        event.preventDefault();
+      }
+      if (/^Digit[1-3]$/.test(code) && pressed && !event.repeat) {
+        startLevel(parseInt(code.slice(5), 10) - 1, false);
+      } else if (code === "ArrowLeft" || code === "KeyA") input.left = pressed;
+      else if (code === "ArrowRight" || code === "KeyD") input.right = pressed;
+      else if (code === "ArrowUp" || code === "KeyW") input.up = pressed;
+      else if (code === "ArrowDown" || code === "KeyS") input.down = pressed;
+      else if (code === "KeyE" && pressed && !event.repeat) handleLoadKey();
+      else if (code === "Space") {
+        if (gameState === "playing") input.level = pressed;
+        if (pressed && !event.repeat) {
+          if (gameState === "title") {
+            startLevel(0, false);
+          } else if (gameState === "briefing") {
+            gameState = "playing";
+          } else if (gameState === "crashed") {
+            resetLevel("playing");
+          } else if (gameState === "levelComplete") {
+            if (levelIndex < LEVELS.length - 1) startLevel(levelIndex + 1, false);
+            else gameState = "gameComplete";
+          } else if (gameState === "gameComplete") {
+            resetGame(false);
+          }
+        }
+      }
+    }
+
+    window.addEventListener("keydown", event => onKey(event, true), { passive: false });
+    window.addEventListener("keyup", event => onKey(event, false), { passive: false });
+    window.addEventListener("blur", clearInput);
+    window.addEventListener("resize", resizeCanvas);
+
+    function frame(now) {
+      const realDt = Math.min(0.1, Math.max(0, (now - lastFrame) / 1000));
+      lastFrame = now;
+      accumulator += realDt;
+      while (accumulator >= FIXED_DT) {
+        stepPhysics(FIXED_DT);
+        updateCamera(FIXED_DT);
+        accumulator -= FIXED_DT;
+      }
+      ctx.setTransform(deviceScale, 0, 0, deviceScale, 0, 0);
+      ctx.clearRect(0, 0, viewWidth, viewHeight);
+      drawWorld(realDt);
+      drawHUD();
+      drawObjectivePointer();
+      if (gameState === "title") drawTitle();
+      else if (gameState === "briefing") drawBriefing();
+      else if (gameState === "crashed") drawCrash();
+      else if (gameState === "levelComplete") drawLevelComplete();
+      else if (gameState === "gameComplete") drawGameComplete();
+      if (!testMode) requestAnimationFrame(frame);
+    }
+
+    function simulateFrames(count) {
+      for (let i = 0; i < count; i++) stepPhysics(FIXED_DT);
+    }
+
+    function setAirborne(x, y, collective) {
+      helicopter.x = x;
+      helicopter.y = y;
+      helicopter.vx = 0;
+      helicopter.vy = 0;
+      helicopter.angle = 0;
+      helicopter.targetAngle = 0;
+      helicopter.angularVelocity = 0;
+      helicopter.collective = collective;
+      helicopter.landed = false;
+      helicopter.landedAt = "";
+      helicopter.facing = 1;
+      gameState = "playing";
+      clearInput();
+    }
+
+    function runSelfTests() {
+      testMode = true;
+      const result = {};
+
+      resetGame(true);
+      input.right = true;
+      simulateFrames(60);
+      result.landedCyclicLocked =
+        helicopter.angle === 0 && helicopter.targetAngle === 0 &&
+        helicopter.angularVelocity === 0;
+
+      resetGame(true);
+      input.up = true;
+      simulateFrames(60);
+      input.up = false;
+      result.collectiveRaised = Math.round(helicopter.collective * 100);
+      const heldCollective = helicopter.collective;
+      simulateFrames(45);
+      result.collectivePersists = Math.abs(helicopter.collective - heldCollective) < 0.0001;
+
+      setAirborne(600, 40, 0.76);
+      const climbStart = helicopter.y;
+      simulateFrames(120);
+      result.climbed = Math.round((helicopter.y - climbStart) * 10) / 10;
+
+      setAirborne(700, 85, 0.62);
+      input.right = true;
+      simulateFrames(30);
+      input.right = false;
+      const heldTarget = helicopter.targetAngle;
+      simulateFrames(90);
+      result.heldAngleDeg = Math.round(helicopter.angle * 180 / Math.PI);
+      result.angleHeld = Math.abs(helicopter.angle - heldTarget) < 0.02;
+      result.forwardTravel = Math.round((helicopter.x - 700) * 10) / 10;
+
+      setAirborne(700, 500, 0.72);
+      input.right = true;
+      simulateFrames(180);
+      input.right = false;
+      result.unlimitedAngleDeg = Math.round(helicopter.angle * 180 / Math.PI);
+      input.level = true;
+      simulateFrames(150);
+      input.level = false;
+      result.spaceLevelledDeg =
+        Math.round(Math.abs(helicopter.angle * 180 / Math.PI) * 10) / 10;
+
+      setAirborne(700, 100, 0.62);
+      helicopter.vx = -DIRECTION_FLIP_SPEED - 1;
+      stepPhysics(FIXED_DT);
+      result.facesLeftInReverse = helicopter.facing === -1;
+      helicopter.vx = DIRECTION_FLIP_SPEED + 1;
+      stepPhysics(FIXED_DT);
+      result.facesRightForward = helicopter.facing === 1;
+
+      setAirborne(134, SHIP_DECK_Y + SKID_DROP + 0.01, 0.3);
+      helicopter.vy = -2;
+      stepPhysics(FIXED_DT);
+      result.safeLanding = helicopter.landed && gameState === "playing";
+
+      setAirborne(134, SHIP_DECK_Y + SKID_DROP + 0.01, 0.3);
+      helicopter.vy = -5;
+      stepPhysics(FIXED_DT);
+      result.hardLandingCrash = gameState === "crashed";
+
+      setAirborne(500, SKID_DROP + 0.01, 0.2);
+      helicopter.vy = -4;
+      stepPhysics(FIXED_DT);
+      result.waterCrash = gameState === "crashed" && crashReason.indexOf("Water") === 0;
+
+      startLevel(0, true);
+      setAirborne(SCOUT_X, SCOUT_PEAK_Y + 25, GRAVITY / MAX_LIFT_ACCEL);
+      simulateFrames(Math.ceil(SCOUT_TIME / FIXED_DT) + 2);
+      result.icebergScouted = icebergScouted;
+      result.scoutRetargeted = activeObjective().x ===
+        (SHIP_DECK.x1 + SHIP_DECK.x2) / 2;
+      settleLanding(SHIP_DECK);
+      result.scoutComplete = gameState === "levelComplete";
+
+      startLevel(1, true);
+      result.passengersLoaded = passengersAboard === 6;
+      settleLanding(STATION_PAD);
+      result.passengerComplete =
+        gameState === "levelComplete" && passengersAboard === 0;
+
+      startLevel(2, true);
+      handleLoadKey();
+      simulateFrames(90);
+      result.cableDeployed = Math.abs(cableLength - CABLE_MAX_LENGTH) < 0.01;
+      handleLoadKey();
+      result.cableRetracts = cableTargetLength === 0;
+      handleLoadKey();
+      result.cableRedeploys = cableTargetLength === CABLE_MAX_LENGTH;
+      setAirborne(
+        PALLET_PICKUP_X,
+        pallet.y + 1.3 + CABLE_MAX_LENGTH,
+        0.72
+      );
+      cableLength = CABLE_MAX_LENGTH;
+      cableTargetLength = CABLE_MAX_LENGTH;
+      stepPhysics(FIXED_DT);
+      result.palletAttached = loadAttached();
+      const attachedAnchor = slingHardpoint();
+      result.palletConstrained =
+        Math.hypot(pallet.x - attachedAnchor.x, pallet.y - attachedAnchor.y) <=
+        CABLE_MAX_LENGTH + 0.01;
+      result.loadMassApplied = loadAttached() && LOAD_MASS_RATIO === 0.3;
+      const cargoX = (CARGO_ZONE.x1 + CARGO_ZONE.x2) / 2;
+      pallet.x = cargoX;
+      pallet.y = cargoGroundY() + PALLET_HEIGHT + 0.2;
+      pallet.vx = 0;
+      pallet.vy = 0;
+      releasePallet();
+      result.validDelivery = deliveries === 1 && !!pallet;
+
+      pallet.status = "attached";
+      pallet.x = cargoX;
+      pallet.y = cargoGroundY() + PALLET_HEIGHT + 8;
+      pallet.vx = 0;
+      pallet.vy = 0;
+      releasePallet();
+      result.brokenLoadReplaced =
+        deliveries === 1 && pallet && pallet.status === "waiting" &&
+        pallet.x === PALLET_PICKUP_X;
+
+      while (deliveries < 3) {
+        pallet.status = "attached";
+        pallet.x = cargoX;
+        pallet.y = cargoGroundY() + PALLET_HEIGHT + 0.2;
+        pallet.vx = 0;
+        pallet.vy = 0;
+        releasePallet();
+      }
+      result.threeDelivered = deliveries === 3 && pallet === null;
+      result.slingRetargeted = activeObjective().x ===
+        (SHIP_DECK.x1 + SHIP_DECK.x2) / 2;
+      settleLanding(SHIP_DECK);
+      result.slingComplete = gameState === "levelComplete";
+      result.distanceLabels =
+        formatObjectiveDistance(999) === "999 m" &&
+        formatObjectiveDistance(1000) === "1.0 km";
+      onKey(
+        { code: "Digit3", repeat: false, preventDefault: function() {} },
+        true
+      );
+      result.levelSkip =
+        levelIndex === 2 && level.mission === "sling" && gameState === "briefing";
+
+      result.pass = result.collectiveRaised === 35 &&
+        result.collectivePersists &&
+        result.landedCyclicLocked &&
+        result.climbed > 3 &&
+        result.heldAngleDeg >= 20 &&
+        result.angleHeld &&
+        result.forwardTravel > 2 &&
+        result.unlimitedAngleDeg > 90 &&
+        result.spaceLevelledDeg < 1 &&
+        result.facesLeftInReverse &&
+        result.facesRightForward &&
+        result.safeLanding &&
+        result.hardLandingCrash &&
+        result.waterCrash &&
+        result.icebergScouted &&
+        result.scoutRetargeted &&
+        result.scoutComplete &&
+        result.passengersLoaded &&
+        result.passengerComplete &&
+        result.cableDeployed &&
+        result.cableRetracts &&
+        result.cableRedeploys &&
+        result.palletAttached &&
+        result.palletConstrained &&
+        result.loadMassApplied &&
+        result.validDelivery &&
+        result.brokenLoadReplaced &&
+        result.threeDelivered &&
+        result.slingRetargeted &&
+        result.slingComplete &&
+        result.distanceLabels &&
+        result.levelSkip;
+
+      resetGame(false);
+      const report = document.createElement("div");
+      report.id = "test-result";
+      report.textContent = JSON.stringify(result);
+      document.body.appendChild(report);
+      frame(performance.now());
+    }
+
+    resizeCanvas();
+    resetGame(false);
+    if (location.hash === "#test") runSelfTests();
+    else {
+      const playHash = /^#play([1-3])$/.exec(location.hash);
+      if (playHash) startLevel(parseInt(playHash[1], 10) - 1, true);
+      requestAnimationFrame(frame);
+    }
+  </script>
+</body>
+</html>
