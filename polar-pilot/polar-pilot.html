@@ -71,6 +71,8 @@
     const SCOUT_TIME = 4;
     const CABLE_MAX_LENGTH = 12;
     const CABLE_RATE = CABLE_MAX_LENGTH / 1.5;
+    const CABLE_HOOK_VERTICAL_TOLERANCE = 1.25;
+    const CABLE_HOOK_EDGE_TOLERANCE = 0.5;
     const LOAD_MASS_RATIO = 0.3;
     const PALLET_WIDTH = 6;
     const PALLET_HEIGHT = 4;
@@ -529,13 +531,17 @@
       if (!pallet) return;
       const anchor = slingHardpoint();
 
-      if (!loadAttached() && cableLength >= CABLE_MAX_LENGTH - 0.05) {
+      if (!loadAttached() && cableTargetLength > 0 && cableLength > 0.02) {
         const hookY = anchor.y - cableLength;
         const relativeSpeed = Math.hypot(
           helicopter.vx - pallet.vx,
           helicopter.vy - pallet.vy
         );
-        if (Math.hypot(anchor.x - pallet.x, hookY - pallet.y) <= 1.25 &&
+        const hookOverCage =
+          Math.abs(anchor.x - pallet.x) <=
+            PALLET_WIDTH / 2 + CABLE_HOOK_EDGE_TOLERANCE &&
+          Math.abs(hookY - pallet.y) <= CABLE_HOOK_VERTICAL_TOLERANCE;
+        if (hookOverCage &&
             relativeSpeed <= 2) attachPallet();
       }
 
@@ -893,63 +899,215 @@
       ctx.save();
       ctx.translate(x, y);
 
-      ctx.fillStyle = "#182933";
+      // "Nuyina" is mirrored so the existing flight deck remains at the stern.
+      const hullGradient = ctx.createLinearGradient(0, -18 * s, 0, 4 * s);
+      hullGradient.addColorStop(0, '#f04b39');
+      hullGradient.addColorStop(0.62, '#cf2530');
+      hullGradient.addColorStop(1, '#8f1825');
+
+      ctx.fillStyle = '#111b22';
       ctx.beginPath();
-      ctx.moveTo(0, -8 * s);
-      ctx.lineTo(66 * s, -11 * s);
-      ctx.lineTo(194 * s, -11 * s);
-      ctx.lineTo(326 * s, -8 * s);
-      ctx.lineTo(306 * s, 3 * s);
-      ctx.lineTo(43 * s, 5 * s);
+      ctx.moveTo(0, -14 * s);
+      ctx.lineTo(13 * s, -18 * s);
+      ctx.lineTo(308 * s, -12 * s);
+      ctx.lineTo(326 * s, -10 * s);
+      ctx.lineTo(326 * s, -3 * s);
+      ctx.quadraticCurveTo(285 * s, 4 * s, 194 * s, 5 * s);
+      ctx.lineTo(45 * s, 5 * s);
+      ctx.quadraticCurveTo(8 * s, 3 * s, 0, -14 * s);
       ctx.closePath();
       ctx.fill();
 
-      ctx.fillStyle = "#ef5a25";
+      ctx.fillStyle = hullGradient;
       ctx.beginPath();
-      ctx.moveTo(0, -8 * s);
-      ctx.lineTo(326 * s, -8 * s);
-      ctx.lineTo(306 * s, -1 * s);
-      ctx.lineTo(50 * s, 1 * s);
+      ctx.moveTo(0, -14 * s);
+      ctx.lineTo(13 * s, -18 * s);
+      ctx.lineTo(72 * s, -18 * s);
+      ctx.lineTo(82 * s, -15 * s);
+      ctx.lineTo(326 * s, -12 * s);
+      ctx.lineTo(326 * s, -3 * s);
+      ctx.quadraticCurveTo(265 * s, 0, 48 * s, 1.5 * s);
+      ctx.quadraticCurveTo(10 * s, 0, 0, -14 * s);
       ctx.closePath();
       ctx.fill();
 
-      ctx.fillStyle = "#f2f3e9";
-      ctx.fillRect(75 * s, -18 * s, 132 * s, 7 * s);
-      ctx.fillRect(78 * s, -30 * s, 98 * s, 12 * s);
-      ctx.fillRect(88 * s, -39 * s, 70 * s, 9 * s);
-      ctx.fillStyle = "#153447";
-      for (let i = 0; i < 7; i++) ctx.fillRect((94 + i * 9) * s, -36 * s, 6 * s, 3 * s);
-
-      ctx.strokeStyle = "#d8e4e2";
+      ctx.fillStyle = '#f4f5ed';
+      ctx.beginPath();
+      ctx.moveTo(20 * s, -21 * s);
+      ctx.lineTo(216 * s, -20 * s);
+      ctx.lineTo(223 * s, -14 * s);
+      ctx.lineTo(77 * s, -14 * s);
+      ctx.lineTo(68 * s, -17.5 * s);
+      ctx.lineTo(20 * s, -17.5 * s);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#25343a';
+      ctx.fillRect(17 * s, -18.2 * s, 58 * s, 0.8 * s);
+      ctx.fillStyle = '#17262d';
+      ctx.roundRect(30 * s, -15 * s, 13 * s, 5 * s, 2 * s);
+      ctx.fill();
+      ctx.roundRect(157 * s, -14.5 * s, 21 * s, 5 * s, 1.5 * s);
+      ctx.fill();
+      ctx.roundRect(187 * s, -14.5 * s, 17 * s, 5 * s, 1.5 * s);
+      ctx.fill();
+      for (let i = 0; i < 14; i++) {
+        ctx.beginPath();
+        ctx.arc((55 + i * 15) * s, -6.7 * s, 0.7 * s, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#fff8e8';
+      ctx.font = 'bold 11px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('NUYINA', 24 * s, -10.3 * s);
+      ctx.font = 'bold 7px Arial';
+      ctx.fillText('HOBART', 24 * s, -8.2 * s);
+      ctx.strokeStyle = '#d7dfda';
       ctx.lineWidth = 1.2;
       ctx.beginPath();
-      ctx.moveTo(125 * s, -39 * s);
-      ctx.lineTo(125 * s, -53 * s);
-      ctx.lineTo(115 * s, -53 * s);
-      ctx.moveTo(125 * s, -49 * s);
-      ctx.lineTo(138 * s, -45 * s);
+      ctx.moveTo(17 * s, -21 * s);
+      ctx.lineTo(68 * s, -21 * s);
+      ctx.moveTo(20 * s, -21 * s);
+      ctx.lineTo(20 * s, -24 * s);
+      ctx.moveTo(28 * s, -21 * s);
+      ctx.lineTo(28 * s, -23 * s);
+      ctx.moveTo(62 * s, -21 * s);
+      ctx.lineTo(62 * s, -23 * s);
       ctx.stroke();
+      ctx.fillStyle = '#d8dfda';
+      ctx.fillRect(47 * s, -24 * s, 13 * s, 3 * s);
+      ctx.fillStyle = '#eef0e8';
+      ctx.beginPath();
+      ctx.moveTo(67 * s, -20 * s);
+      ctx.lineTo(214 * s, -20 * s);
+      ctx.lineTo(214 * s, -27 * s);
+      ctx.lineTo(195 * s, -30 * s);
+      ctx.lineTo(132 * s, -30 * s);
+      ctx.lineTo(126 * s, -39 * s);
+      ctx.lineTo(76 * s, -39 * s);
+      ctx.lineTo(67 * s, -31 * s);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#d9ddd5';
+      ctx.fillRect(128 * s, -36 * s, 57 * s, 6 * s);
+      ctx.fillRect(181 * s, -30 * s, 33 * s, 10 * s);
 
+      ctx.fillStyle = '#152b34';
+      ctx.beginPath();
+      ctx.moveTo(72 * s, -37 * s);
+      ctx.lineTo(78 * s, -42 * s);
+      ctx.lineTo(123 * s, -42 * s);
+      ctx.lineTo(127 * s, -37 * s);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#aebbb8';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 6; i++) {
+        ctx.beginPath();
+        ctx.moveTo((79 + i * 7.5) * s, -42 * s);
+        ctx.lineTo((77 + i * 8.4) * s, -37 * s);
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#1c2f36';
+      for (let i = 0; i < 5; i++) {
+        ctx.fillRect((76 + i * 10) * s, -33 * s, 5 * s, 3 * s);
+      }
+      for (let i = 0; i < 6; i++) {
+        ctx.fillRect((78 + i * 11) * s, -27 * s, 4 * s, 4 * s);
+      }
+
+      ctx.fillStyle = '#f58020';
+      ctx.roundRect(113 * s, -27.5 * s, 31 * s, 7 * s, 3.5 * s);
+      ctx.fill();
+      ctx.roundRect(174 * s, -27.5 * s, 27 * s, 7 * s, 3.5 * s);
+      ctx.fill();
+      ctx.strokeStyle = '#b94d1b';
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(117 * s, -26.2 * s, 23 * s, 4.5 * s);
+      ctx.strokeRect(178 * s, -26.2 * s, 19 * s, 4.5 * s);
+      ctx.fillStyle = '#eef0e8';
+      ctx.fillRect(142 * s, -39 * s, 48 * s, 6 * s);
+      ctx.strokeStyle = '#1b2428';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(145 * s, -39 * s);
+      ctx.lineTo(151 * s, -55 * s);
+      ctx.lineTo(182 * s, -55 * s);
+      ctx.lineTo(189 * s, -39 * s);
+      ctx.moveTo(151 * s, -51 * s);
+      ctx.lineTo(185 * s, -51 * s);
+      ctx.moveTo(149 * s, -47 * s);
+      ctx.lineTo(187 * s, -47 * s);
+      ctx.moveTo(147 * s, -43 * s);
+      ctx.lineTo(189 * s, -43 * s);
+      ctx.moveTo(151 * s, -55 * s);
+      ctx.lineTo(189 * s, -39 * s);
+      ctx.moveTo(182 * s, -55 * s);
+      ctx.lineTo(145 * s, -39 * s);
+      ctx.stroke();
+      ctx.fillStyle = '#434c4c';
+      ctx.fillRect(155 * s, -59 * s, 6 * s, 7 * s);
+      ctx.fillRect(173 * s, -59 * s, 6 * s, 7 * s);
+      ctx.strokeStyle = '#d6ddd8';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(105 * s, -42 * s);
+      ctx.lineTo(105 * s, -65 * s);
+      ctx.moveTo(94 * s, -48 * s);
+      ctx.lineTo(116 * s, -48 * s);
+      ctx.moveTo(97 * s, -55 * s);
+      ctx.lineTo(114 * s, -55 * s);
+      ctx.moveTo(105 * s, -61 * s);
+      ctx.lineTo(115 * s, -58 * s);
+      ctx.stroke();
+      ctx.fillStyle = '#e8ebe3';
+      ctx.fillRect(96 * s, -52 * s, 18 * s, 2 * s);
+      ctx.fillRect(99 * s, -58 * s, 14 * s, 2 * s);
+      ctx.beginPath();
+      ctx.arc(105 * s, -65 * s, 4 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(122 * s, -47 * s, 3.2 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#dfe4de';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(207 * s, -25 * s);
+      ctx.lineTo(216 * s, -38 * s);
+      ctx.lineTo(247 * s, -34 * s);
+      ctx.lineTo(257 * s, -29 * s);
+      ctx.stroke();
+      ctx.fillStyle = '#cbd2cc';
+      ctx.beginPath();
+      ctx.arc(207 * s, -25 * s, 3.2 * s, 0, Math.PI * 2);
+      ctx.fill();
       const deckX = (SHIP_DECK.x1 + 130) * s;
       const deckW = (SHIP_DECK.x2 - SHIP_DECK.x1) * s;
-      ctx.fillStyle = "#31535c";
+      ctx.fillStyle = '#315258';
       ctx.fillRect(deckX, -SHIP_DECK_Y * s, deckW, 2 * s);
-      ctx.strokeStyle = "#f4d84a";
+      ctx.strokeStyle = '#7bf5bc';
       ctx.lineWidth = 2;
       ctx.strokeRect(deckX + 2, -SHIP_DECK_Y * s - 1, deckW - 4, 5);
-      ctx.fillStyle = "#f4d84a";
-      ctx.font = "bold 18px Arial";
-      ctx.textAlign = "center";
-      ctx.fillText("H", deckX + deckW / 2, -SHIP_DECK_Y * s + 18);
+      ctx.fillStyle = '#7bf5bc';
+      for (let light = 5; light < deckW - 4; light += 17) {
+        ctx.beginPath();
+        ctx.arc(deckX + light, -SHIP_DECK_Y * s + 1, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
 
-      ctx.save();
-      ctx.translate(132 * s, -5 * s);
-      ctx.rotate(Math.PI);
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "bold 5px Arial";
-      ctx.textAlign = "center";
-      ctx.fillText("RSV NUYINA", 0, 0);
-      ctx.restore();
+      ctx.strokeStyle = '#e4ebe5';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(deckX, -16 * s);
+      ctx.lineTo(deckX + deckW, -16 * s);
+      for (let rail = 0; rail <= deckW; rail += 25) {
+        ctx.moveTo(deckX + rail, -16 * s);
+        ctx.lineTo(deckX + rail, -14 * s);
+      }
+      ctx.stroke();
+      ctx.fillStyle = '#f4d84a';
+      ctx.font = 'bold 18px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('H', deckX + deckW / 2, -SHIP_DECK_Y * s + 18);
       ctx.restore();
     }
 
@@ -1138,109 +1296,187 @@
       ctx.scale(s * helicopter.facing, s);
 
       ctx.strokeStyle = "#17272e";
-      ctx.lineWidth = 0.25;
+      ctx.lineWidth = 0.22;
       ctx.lineCap = "round";
 
-      // Skids and struts
+      // Long, lightly upswept Squirrel skids and their exposed cross-tube frame.
       ctx.beginPath();
-      ctx.moveTo(-3.2, 2.15);
-      ctx.lineTo(3.35, 2.15);
-      ctx.quadraticCurveTo(3.8, 2.15, 4, 1.85);
-      ctx.moveTo(-2.35, 2.1);
-      ctx.lineTo(-1.8, 1.1);
-      ctx.moveTo(2.1, 2.1);
-      ctx.lineTo(1.7, 1.15);
+      ctx.moveTo(-3.55, 2.15);
+      ctx.lineTo(3.5, 2.15);
+      ctx.quadraticCurveTo(4.05, 2.15, 4.3, 1.72);
+      ctx.moveTo(-3.2, 1.93);
+      ctx.lineTo(3.65, 1.93);
+      ctx.moveTo(-2.6, 2.08);
+      ctx.lineTo(-1.95, 1.05);
+      ctx.moveTo(-1.25, 2.08);
+      ctx.lineTo(-0.9, 1.2);
+      ctx.moveTo(1.85, 2.08);
+      ctx.lineTo(1.55, 1.12);
+      ctx.moveTo(3.05, 2.05);
+      ctx.lineTo(2.45, 1.25);
       ctx.stroke();
 
-      // Tail boom and stabiliser
-      ctx.fillStyle = "#e74e24";
+      // Slender tail boom, swept fin and tailplane.
+      const tailGradient = ctx.createLinearGradient(-8.2, 0, -1.2, 0);
+      tailGradient.addColorStop(0, "#9d1728");
+      tailGradient.addColorStop(0.55, "#bd1c31");
+      tailGradient.addColorStop(1, "#d52a38");
+      ctx.fillStyle = tailGradient;
       ctx.beginPath();
-      ctx.moveTo(-1.8, -0.5);
-      ctx.lineTo(-7.4, -1.05);
-      ctx.lineTo(-7.15, 0.15);
-      ctx.lineTo(-1.5, 0.75);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = "#f15a29";
-      ctx.beginPath();
-      ctx.moveTo(-6.9, -0.8);
-      ctx.lineTo(-6.35, -3.0);
-      ctx.lineTo(-5.75, -2.9);
-      ctx.lineTo(-6.0, -0.65);
-      ctx.closePath();
-      ctx.fill();
-      ctx.beginPath();
-      ctx.moveTo(-5.9, -0.65);
-      ctx.lineTo(-4.7, -1.45);
-      ctx.lineTo(-4.45, -1.15);
-      ctx.lineTo(-5.4, -0.35);
-      ctx.closePath();
-      ctx.fill();
-
-      // Cabin and engine cowling
-      ctx.fillStyle = "#ef5b2b";
-      ctx.beginPath();
-      ctx.moveTo(-2.2, 0.9);
-      ctx.quadraticCurveTo(-2.45, -1.5, -0.7, -2.0);
-      ctx.lineTo(2.0, -1.85);
-      ctx.quadraticCurveTo(4.35, -1.3, 4.65, 0.05);
-      ctx.quadraticCurveTo(4.35, 1.15, 2.65, 1.45);
-      ctx.lineTo(-0.9, 1.4);
-      ctx.quadraticCurveTo(-1.7, 1.35, -2.2, 0.9);
+      ctx.moveTo(-1.65, -0.62);
+      ctx.lineTo(-8.15, -1.08);
+      ctx.lineTo(-7.92, -0.15);
+      ctx.lineTo(-1.45, 0.58);
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
 
-      // AS350-style windows
-      ctx.fillStyle = "#75c1d4";
+      ctx.fillStyle = "#b51b2e";
       ctx.beginPath();
-      ctx.moveTo(1.1, -1.55);
-      ctx.lineTo(2.1, -1.42);
-      ctx.quadraticCurveTo(3.65, -1.05, 4.15, -0.15);
-      ctx.lineTo(1.15, -0.15);
+      ctx.moveTo(-7.95, -0.72);
+      ctx.lineTo(-7.45, -3.35);
+      ctx.lineTo(-6.75, -3.15);
+      ctx.lineTo(-6.85, -0.55);
       ctx.closePath();
       ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#222f35";
       ctx.beginPath();
-      ctx.moveTo(-0.55, -1.65);
-      ctx.lineTo(0.75, -1.6);
-      ctx.lineTo(0.8, -0.15);
-      ctx.lineTo(-0.55, -0.15);
+      ctx.moveTo(-6.8, -0.65);
+      ctx.lineTo(-5.2, -1.42);
+      ctx.lineTo(-4.75, -1.18);
+      ctx.lineTo(-6.35, -0.38);
       ctx.closePath();
       ctx.fill();
-      ctx.strokeStyle = "#d9f0f2";
-      ctx.lineWidth = 0.12;
-      ctx.stroke();
 
-      ctx.fillStyle = "#1e3440";
-      ctx.fillRect(-0.8, 0.05, 0.16, 1.05);
-      ctx.fillRect(0.86, -1.55, 0.12, 2.65);
-      ctx.fillStyle = "#f2d33c";
-      ctx.fillRect(-2.0, 0.85, 5.8, 0.28);
-
-      // Mast and rotor
-      ctx.strokeStyle = "#25363a";
-      ctx.lineWidth = 0.22;
-      ctx.beginPath();
-      ctx.moveTo(0, -1.9);
-      ctx.lineTo(0, -2.75);
-      ctx.stroke();
-      const rotorWidth = 6.8 + Math.abs(Math.sin(rotorPhase)) * 2.1;
-      ctx.strokeStyle = "rgba(25,37,40,0.85)";
+      ctx.strokeStyle = "#f0f3eb";
       ctx.lineWidth = 0.16;
       ctx.beginPath();
-      ctx.moveTo(-rotorWidth, -2.75);
-      ctx.lineTo(rotorWidth, -2.75);
+      ctx.moveTo(-7.55, -2.8);
+      ctx.lineTo(-6.9, -2.62);
       ctx.stroke();
-      ctx.strokeStyle = "rgba(218,232,229,0.33)";
-      ctx.lineWidth = 0.32;
+      ctx.strokeStyle = "#17272e";
+      ctx.lineWidth = 0.22;
+
+      // Compact rounded cabin and the raised Turbomeca engine cowling.
+      const cabinGradient = ctx.createLinearGradient(-1.5, -2.2, 3.8, 1.5);
+      cabinGradient.addColorStop(0, "#b8182b");
+      cabinGradient.addColorStop(0.52, "#d92538");
+      cabinGradient.addColorStop(1, "#b5162b");
+      ctx.fillStyle = cabinGradient;
       ctx.beginPath();
-      ctx.moveTo(-rotorWidth * 0.9, -2.8);
-      ctx.lineTo(rotorWidth * 0.9, -2.8);
+      ctx.moveTo(-2.05, 0.85);
+      ctx.quadraticCurveTo(-2.4, -0.75, -1.35, -1.68);
+      ctx.quadraticCurveTo(-0.65, -2.18, 1.15, -2.05);
+      ctx.lineTo(2.25, -1.86);
+      ctx.quadraticCurveTo(4.1, -1.5, 4.58, -0.25);
+      ctx.quadraticCurveTo(4.82, 0.72, 3.65, 1.22);
+      ctx.quadraticCurveTo(3.05, 1.48, 1.95, 1.46);
+      ctx.lineTo(-0.9, 1.35);
+      ctx.quadraticCurveTo(-1.7, 1.3, -2.05, 0.85);
+      ctx.closePath();
+      ctx.fill();
       ctx.stroke();
 
+      ctx.fillStyle = "#bd1b2f";
+      ctx.beginPath();
+      ctx.moveTo(-1.25, -1.88);
+      ctx.quadraticCurveTo(-0.8, -2.55, 0.15, -2.62);
+      ctx.lineTo(1.55, -2.38);
+      ctx.lineTo(1.95, -1.9);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#212e33";
+      ctx.roundRect(-0.75, -2.5, 1.35, 0.23, 0.1);
+      ctx.fill();
+      ctx.fillRect(1.08, -2.32, 0.48, 0.25);
+
+      // Dark wraparound glazing, split into the Squirrel's door and nose panes.
+      ctx.fillStyle = "#183844";
+      ctx.beginPath();
+      ctx.moveTo(-0.92, -1.72);
+      ctx.lineTo(0.48, -1.82);
+      ctx.lineTo(0.55, -0.18);
+      ctx.lineTo(-0.88, -0.18);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(0.72, -1.8);
+      ctx.lineTo(1.92, -1.62);
+      ctx.lineTo(2.18, -0.2);
+      ctx.lineTo(0.78, -0.18);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(2.12, -1.58);
+      ctx.quadraticCurveTo(3.42, -1.28, 4.1, -0.42);
+      ctx.lineTo(2.38, -0.22);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = "#94c5cb";
+      ctx.lineWidth = 0.12;
+      ctx.beginPath();
+      ctx.moveTo(2.32, -1.39);
+      ctx.quadraticCurveTo(3.2, -1.18, 3.78, -0.64);
+      ctx.stroke();
+
+      ctx.strokeStyle = "#851423";
+      ctx.lineWidth = 0.12;
+      ctx.strokeRect(-1.08, -1.86, 1.8, 3.0);
+      ctx.beginPath();
+      ctx.moveTo(0.68, -1.85);
+      ctx.lineTo(0.78, 1.25);
+      ctx.stroke();
+      ctx.fillStyle = "#1c282d";
+      ctx.fillRect(-1.32, 0.1, 0.72, 0.16);
+      ctx.fillRect(-1.28, 0.42, 0.68, 0.14);
+      ctx.fillStyle = "#f5efe2";
+      ctx.font = "bold 0.62px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("729", -0.15, -2.0);
+      ctx.beginPath();
+      ctx.arc(-1.48, -0.55, 0.27, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#315b89";
+      ctx.beginPath();
+      ctx.arc(-1.48, -0.55, 0.17, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Exposed mast and three-blade Starflex rotor seen almost edge-on.
+      ctx.strokeStyle = "#25363a";
+      ctx.lineWidth = 0.18;
+      ctx.beginPath();
+      ctx.moveTo(0.15, -2.48);
+      ctx.lineTo(0.15, -3.18);
+      ctx.stroke();
+      ctx.fillStyle = "#202b2f";
+      ctx.beginPath();
+      ctx.ellipse(0.15, -3.18, 0.42, 0.14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(210,225,222,0.28)";
+      ctx.lineWidth = 0.22;
+      ctx.beginPath();
+      ctx.moveTo(-7.7, -3.18);
+      ctx.lineTo(7.7, -3.18);
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(24,34,38,0.92)";
+      ctx.lineWidth = 0.13;
+      for (let i = 0; i < 3; i++) {
+        const bladeAngle = rotorPhase + i * Math.PI * 2 / 3;
+        ctx.beginPath();
+        ctx.moveTo(0.15, -3.18);
+        ctx.lineTo(
+          0.15 + Math.cos(bladeAngle) * 7.9,
+          -3.18 + Math.sin(bladeAngle) * 0.2
+        );
+        ctx.stroke();
+      }
+
       // Tail rotor
-      ctx.translate(-7.05, -0.8);
+      ctx.translate(-7.88, -0.78);
       ctx.rotate(rotorPhase * 1.8);
       ctx.strokeStyle = "#f3df7b";
       ctx.lineWidth = 0.18;
@@ -1791,6 +2027,18 @@
         gameState === "levelComplete" && passengersAboard === 0;
 
       startLevel(2, true);
+      setAirborne(
+        PALLET_PICKUP_X + PALLET_WIDTH / 2,
+        pallet.y + 1.3 + CABLE_MAX_LENGTH / 2,
+        GRAVITY / MAX_LIFT_ACCEL
+      );
+      cableLength = CABLE_MAX_LENGTH / 2 - 0.1;
+      cableTargetLength = CABLE_MAX_LENGTH;
+      stepPhysics(FIXED_DT);
+      result.palletAttachedWhileLowering =
+        loadAttached() && cableLength < CABLE_MAX_LENGTH;
+
+      startLevel(2, true);
       handleLoadKey();
       simulateFrames(90);
       result.cableDeployed = Math.abs(cableLength - CABLE_MAX_LENGTH) < 0.01;
@@ -1875,6 +2123,7 @@
         result.cableDeployed &&
         result.cableRetracts &&
         result.cableRedeploys &&
+        result.palletAttachedWhileLowering &&
         result.palletAttached &&
         result.palletConstrained &&
         result.loadMassApplied &&
