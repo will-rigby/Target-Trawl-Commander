@@ -92,6 +92,14 @@
     const STATION_PAD_Y = 12;
     const WORLD_MIN_X = -300;
     const WORLD_MAX_X = 2300;
+    const RESCUE_TERRAIN_START_X = 2100;
+    const RESCUE_PERSON_X = 2920;
+    const RESCUE_CLEARING_Y = 18;
+    const RESCUE_CLEARING_RADIUS = 18;
+    const RESCUE_PICKUP_RADIUS = 13;
+    const SPOTLIGHT_RANGE = 150;
+    const SPOTLIGHT_HALF_ANGLE = 13 * Math.PI / 180;
+    const RESCUE_SPOTLIGHT_TIME = 2;
     const ISA_SEA_LEVEL_TEMPERATURE = 288.15;
     const ISA_TEMPERATURE_LAPSE_RATE = 0.0065;
     const ISA_AIR_GAS_CONSTANT = 287.05;
@@ -104,6 +112,12 @@
       { x1: 1970, x2: 2028, y1: 5, y2: 22 },
       { x1: 2050, x2: 2072, y1: 5, y2: 35 },
     ];
+    const RESCUE_CLEARING = {
+      x1: RESCUE_PERSON_X - RESCUE_CLEARING_RADIUS,
+      x2: RESCUE_PERSON_X + RESCUE_CLEARING_RADIUS,
+      y: RESCUE_CLEARING_Y,
+      name: "SEARCH CLEARING",
+    };
 
     const LEVELS = [
       {
@@ -129,6 +143,14 @@
         station: true,
         worldMaxX: 2300,
         brief: "Sling three cage pallets to the station cargo zone, then return and land aboard Nuyina.",
+      },
+      {
+        number: 4,
+        name: "Night Search and Rescue",
+        mission: "rescue",
+        station: true,
+        worldMaxX: 3400,
+        brief: "A missing expeditioner is somewhere east of Aurora Station. Search the dark terrain with the mouse-aimed spotlight, land beside them, then return to station.",
       },
     ];
 
@@ -159,6 +181,11 @@
     let level = LEVELS[0];
     let scoutTimer = 0;
     let icebergScouted = false;
+    let rescueSpotlightTimer = 0;
+    let rescueLocated = false;
+    let rescueAboard = false;
+    let spotlightAimX = 0;
+    let spotlightAimY = 0;
     let passengersAboard = 0;
     let deliveries = 0;
     let deliveredPallets = [];
@@ -276,6 +303,11 @@
       helicopter.landed = true;
       helicopter.landedAt = SHIP_DECK.name;
       helicopter.facing = 1;
+      if (level && level.mission === "rescue") {
+        helicopter.x = (STATION_PAD.x1 + STATION_PAD.x2) / 2;
+        helicopter.y = STATION_PAD_Y + SKID_DROP;
+        helicopter.landedAt = STATION_PAD.name;
+      }
     }
 
     function spawnPallet() {
@@ -298,6 +330,11 @@
       elapsed = 0;
       scoutTimer = 0;
       icebergScouted = false;
+      rescueSpotlightTimer = 0;
+      rescueLocated = false;
+      rescueAboard = false;
+      spotlightAimX = helicopter.x + 80;
+      spotlightAimY = helicopter.y - 12;
       passengersAboard = level.mission === "passengers" ? 6 : 0;
       deliveries = 0;
       deliveredPallets = [];
@@ -328,7 +365,20 @@
     function iceHeightAt(x) {
       if (!level.station) return -Infinity;
       if (x < 1570) return -Infinity;
-      return 4.2 + Math.sin(x * 0.021) * 0.7 + Math.sin(x * 0.053) * 0.35;
+      const stationIce = 4.2 + Math.sin(x * 0.021) * 0.7 + Math.sin(x * 0.053) * 0.35;
+      return level.mission === "rescue" && x >= RESCUE_TERRAIN_START_X ?
+        rescueTerrainHeightAt(x) : stationIce;
+    }
+
+    function rescueTerrainHeightAt(x) {
+      const rolling = 10 + Math.sin((x - RESCUE_TERRAIN_START_X) * 0.018) * 5 +
+        Math.sin((x - RESCUE_TERRAIN_START_X) * 0.051) * 2.6;
+      const distance = Math.abs(x - RESCUE_PERSON_X);
+      if (distance <= RESCUE_CLEARING_RADIUS) return RESCUE_CLEARING_Y;
+      if (distance >= RESCUE_CLEARING_RADIUS + 32) return rolling;
+      const blend = (distance - RESCUE_CLEARING_RADIUS) / 32;
+      const smoothBlend = blend * blend * (3 - 2 * blend);
+      return lerp(RESCUE_CLEARING_Y, rolling, smoothBlend);
     }
 
     function icebergHeightAt(x) {
@@ -350,6 +400,9 @@
     function landingSurfaceAt(x) {
       if (x >= SHIP_DECK.x1 && x <= SHIP_DECK.x2) return SHIP_DECK;
       if (level.station && x >= STATION_PAD.x1 && x <= STATION_PAD.x2) return STATION_PAD;
+      if (level.mission === "rescue" && x >= RESCUE_CLEARING.x1 && x <= RESCUE_CLEARING.x2) {
+        return RESCUE_CLEARING;
+      }
       return null;
     }
 
@@ -417,6 +470,14 @@
         completeLevel();
       } else if (level.mission === "sling" && deliveries === 3 && surface === SHIP_DECK) {
         completeLevel();
+      } else if (level.mission === "rescue") {
+        if (surface === RESCUE_CLEARING && rescueLocated && !rescueAboard &&
+            Math.abs(helicopter.x - RESCUE_PERSON_X) <= RESCUE_PICKUP_RADIUS) {
+          rescueAboard = true;
+          setMissionNotice("EXPEDITIONER ABOARD - RETURN TO STATION");
+        } else if (surface === STATION_PAD && rescueAboard) {
+          completeLevel();
+        }
       }
     }
 
@@ -655,6 +716,14 @@
           setMissionNotice("ICEBERG SCOUTED — RETURN TO NUYINA");
         }
       }
+      if (level.mission === "rescue" && !rescueLocated && !rescueAboard) {
+        rescueSpotlightTimer = isRescueSpotlightOnPerson() ?
+          Math.min(RESCUE_SPOTLIGHT_TIME, rescueSpotlightTimer + dt) : 0;
+        if (rescueSpotlightTimer >= RESCUE_SPOTLIGHT_TIME) {
+          rescueLocated = true;
+          setMissionNotice("EXPEDITIONER LOCATED - LAND IN THE CLEARING");
+        }
+      }
     }
 
     function stepPhysics(dt) {
@@ -720,8 +789,9 @@
       const horizontalLift = liftAcceleration * Math.sin(helicopter.angle);
 
       if (helicopter.landed) {
-        helicopter.y = (helicopter.landedAt === STATION_PAD.name ?
-          STATION_PAD_Y : SHIP_DECK_Y) + SKID_DROP;
+        const landedSurface = helicopter.landedAt === STATION_PAD.name ? STATION_PAD :
+          helicopter.landedAt === RESCUE_CLEARING.name ? RESCUE_CLEARING : SHIP_DECK;
+        helicopter.y = landedSurface.y + SKID_DROP;
         helicopter.vx = 0;
         helicopter.vy = 0;
         if (verticalLift > GRAVITY * 1.02) {
@@ -794,6 +864,40 @@
 
     function worldToScreenY(y) {
       return viewHeight * 0.46 - (y - cameraY) * PIXELS_PER_METRE;
+    }
+
+    function screenToWorldX(x) {
+      return (x - viewWidth * 0.46) / PIXELS_PER_METRE + cameraX;
+    }
+
+    function screenToWorldY(y) {
+      return (viewHeight * 0.46 - y) / PIXELS_PER_METRE + cameraY;
+    }
+
+    function aimSpotlight(event) {
+      const rect = canvas.getBoundingClientRect();
+      const screenX = (event.clientX - rect.left) * viewWidth / rect.width;
+      const screenY = (event.clientY - rect.top) * viewHeight / rect.height;
+      spotlightAimX = screenToWorldX(screenX);
+      spotlightAimY = screenToWorldY(screenY);
+    }
+
+    function isRescueSpotlightOnPerson() {
+      if (level.mission !== "rescue") return false;
+      const originX = helicopter.x;
+      const originY = helicopter.y - 1;
+      const aimX = spotlightAimX - originX;
+      const aimY = spotlightAimY - originY;
+      const aimLength = Math.hypot(aimX, aimY);
+      if (aimLength < 0.01) return false;
+      const directionX = aimX / aimLength;
+      const directionY = aimY / aimLength;
+      const personX = RESCUE_PERSON_X - originX;
+      const personY = RESCUE_CLEARING_Y + 1 - originY;
+      const alongBeam = personX * directionX + personY * directionY;
+      const acrossBeam = Math.abs(personX * directionY - personY * directionX);
+      return alongBeam > 0 && alongBeam <= SPOTLIGHT_RANGE &&
+        acrossBeam <= 4 + alongBeam * Math.tan(SPOTLIGHT_HALF_ANGLE);
     }
 
     function drawSky() {
@@ -886,10 +990,10 @@
       if (startX > viewWidth + 100) return;
       ctx.beginPath();
       ctx.moveTo(startX, viewHeight);
-      for (let x = 1570; x <= WORLD_MAX_X + 200; x += 8) {
+      for (let x = 1570; x <= level.worldMaxX + 200; x += 8) {
         ctx.lineTo(worldToScreenX(x), worldToScreenY(iceHeightAt(x)));
       }
-      ctx.lineTo(worldToScreenX(WORLD_MAX_X + 200), viewHeight);
+      ctx.lineTo(worldToScreenX(level.worldMaxX + 200), viewHeight);
       ctx.closePath();
       const gradient = ctx.createLinearGradient(0, worldToScreenY(7), 0, viewHeight);
       gradient.addColorStop(0, "#edf7f5");
@@ -901,7 +1005,7 @@
       ctx.strokeStyle = "#f7ffff";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      for (let x = 1570; x <= WORLD_MAX_X + 200; x += 8) {
+      for (let x = 1570; x <= level.worldMaxX + 200; x += 8) {
         const sx = worldToScreenX(x);
         const sy = worldToScreenY(iceHeightAt(x));
         if (x === 1570) ctx.moveTo(sx, sy);
@@ -1589,6 +1693,65 @@
       }
     }
 
+    function drawNightVeil() {
+      if (level.mission !== "rescue") return;
+      ctx.fillStyle = "rgba(1, 8, 22, 0.76)";
+      ctx.fillRect(0, 0, viewWidth, viewHeight);
+      ctx.fillStyle = "rgba(224, 239, 255, 0.75)";
+      for (let i = 0; i < 34; i++) {
+        const x = (i * 83 + 41) % viewWidth;
+        const y = 25 + (i * 47) % Math.max(55, viewHeight * 0.42);
+        ctx.globalAlpha = 0.35 + (i % 3) * 0.16;
+        ctx.fillRect(x, y, 1.2, 1.2);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawSpotlight() {
+      if (level.mission !== "rescue") return;
+      const originX = worldToScreenX(helicopter.x);
+      const originY = worldToScreenY(helicopter.y - 1);
+      const aimX = spotlightAimX - helicopter.x;
+      const aimY = spotlightAimY - (helicopter.y - 1);
+      const aimLength = Math.hypot(aimX, aimY) || 1;
+      const directionX = aimX / aimLength;
+      const directionY = -aimY / aimLength;
+      const beamLength = SPOTLIGHT_RANGE * PIXELS_PER_METRE;
+      const endX = originX + directionX * beamLength;
+      const endY = originY + directionY * beamLength;
+      const perpendicularX = -directionY;
+      const perpendicularY = directionX;
+      const endHalfWidth = Math.tan(SPOTLIGHT_HALF_ANGLE) * beamLength;
+      const gradient = ctx.createLinearGradient(originX, originY, endX, endY);
+      gradient.addColorStop(0, "rgba(255, 250, 202, 0.34)");
+      gradient.addColorStop(0.55, "rgba(230, 242, 204, 0.17)");
+      gradient.addColorStop(1, "rgba(190, 220, 186, 0.02)");
+      ctx.save();
+      ctx.globalCompositeOperation = "screen";
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.moveTo(originX, originY);
+      ctx.lineTo(endX + perpendicularX * endHalfWidth, endY + perpendicularY * endHalfWidth);
+      ctx.lineTo(endX - perpendicularX * endHalfWidth, endY - perpendicularY * endHalfWidth);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawRescueExpeditioner() {
+      if (level.mission !== "rescue" || rescueAboard ||
+          (!rescueLocated && !isRescueSpotlightOnPerson())) return;
+      const x = worldToScreenX(RESCUE_PERSON_X);
+      const y = worldToScreenY(RESCUE_CLEARING_Y);
+      ctx.save();
+      ctx.fillStyle = "rgba(255, 244, 158, 0.3)";
+      ctx.beginPath();
+      ctx.arc(x, y - 10, 15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      drawExpeditioner(RESCUE_PERSON_X, RESCUE_CLEARING_Y, 1);
+    }
+
     function updateAndDrawSnow(realDt) {
       ctx.fillStyle = "#fff";
       for (const flake of snow) {
@@ -1618,8 +1781,11 @@
       drawWash();
       drawShadow();
       drawSling();
-      drawHelicopter();
       updateAndDrawSnow(realDt);
+      drawNightVeil();
+      drawSpotlight();
+      drawRescueExpeditioner();
+      drawHelicopter();
       drawFlightReadout();
     }
 
@@ -1639,6 +1805,11 @@
       if (level.mission === "passengers") {
         return "Deliver " + passengersAboard + " expeditioners to Aurora Station";
       }
+      if (level.mission === "rescue") {
+        if (rescueAboard) return "Return the expeditioner to Aurora Station";
+        if (rescueLocated) return "Land beside the located expeditioner";
+        return "Search east of station with the spotlight";
+      }
       if (deliveries >= 3) return "Return to Nuyina and land";
       if (loadAttached()) return "Place cage " + (deliveries + 1) + " in the station cargo zone";
       return "Pick up cage " + (deliveries + 1) + " of 3";
@@ -1652,6 +1823,10 @@
       }
       if (level.mission === "passengers") {
         return { x: (STATION_PAD.x1 + STATION_PAD.x2) / 2, y: STATION_PAD.y };
+      }
+      if (level.mission === "rescue") {
+        if (rescueAboard) return { x: (STATION_PAD.x1 + STATION_PAD.x2) / 2, y: STATION_PAD.y };
+        return rescueLocated ? { x: RESCUE_PERSON_X, y: RESCUE_CLEARING_Y } : null;
       }
       if (deliveries >= 3) {
         return { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: SHIP_DECK.y };
@@ -1758,7 +1933,8 @@
       }
 
       const objectiveWidth = Math.min(520, viewWidth - 24);
-      drawRoundedPanel(12, 104, objectiveWidth, level.mission === "sling" ? 84 : 48, 8,
+      const objectiveHeight = level.mission === "sling" ? 84 : level.mission === "rescue" ? 68 : 48;
+      drawRoundedPanel(12, 104, objectiveWidth, objectiveHeight, 8,
         "rgba(5,20,29,0.78)");
       ctx.textAlign = "left";
       ctx.fillStyle = "#ffd65a";
@@ -1767,6 +1943,15 @@
       ctx.fillStyle = "#fff";
       ctx.font = "bold 14px Trebuchet MS";
       ctx.fillText(objectiveText(), 25, 146);
+
+      if (level.mission === "rescue" && !rescueLocated && !rescueAboard) {
+        ctx.fillStyle = "#b8dce8";
+        ctx.font = "12px Trebuchet MS";
+        ctx.fillText(
+          "SPOTLIGHT " + rescueSpotlightTimer.toFixed(1) + " / " + RESCUE_SPOTLIGHT_TIME.toFixed(1) + " s",
+          25, 165
+        );
+      }
 
       if (level.mission === "sling") {
         const cableState = loadAttached() ? "ATTACHED" :
@@ -1842,7 +2027,7 @@
       ctx.fillText("POLAR PILOT", viewWidth / 2, y + 90);
       ctx.fillStyle = "#cde7e9";
       ctx.font = "bold 17px Trebuchet MS";
-      ctx.fillText("THREE ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
+      ctx.fillText("FOUR ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
 
       ctx.fillStyle = "#fff";
       ctx.font = "16px Trebuchet MS";
@@ -1861,7 +2046,7 @@
       ctx.fillText("PRESS SPACE TO FLY", viewWidth / 2, y + 310);
       ctx.fillStyle = "#9ed5d8";
       ctx.font = "bold 12px Trebuchet MS";
-      ctx.fillText("1–3: JUMP TO LEVEL", viewWidth / 2, y + 335);
+      ctx.fillText("1-4: JUMP TO LEVEL", viewWidth / 2, y + 335);
     }
 
     function drawBriefing() {
@@ -1870,7 +2055,9 @@
         level.brief,
         level.mission === "sling" ?
           "E deploys or retracts the line and releases an attached cage." :
-          "Follow the yellow objective chevron.",
+          level.mission === "rescue" ?
+            "Aim the spotlight with the mouse and hold it on the person for two seconds." :
+            "Follow the yellow objective chevron.",
         "PRESS SPACE TO BEGIN"
       );
     }
@@ -1880,6 +2067,7 @@
       if (level.mission === "scout") message = "Iceberg inspected and aircraft safely back aboard.";
       else if (level.mission === "passengers") message = "All six expeditioners are safely ashore.";
       else if (level.mission === "sling") message = "Three cages delivered and aircraft returned to Nuyina.";
+      else if (level.mission === "rescue") message = "The missing expeditioner is safely back at Aurora Station.";
       drawMissionPanel(
         "MISSION COMPLETE",
         message,
@@ -1891,7 +2079,7 @@
     function drawGameComplete() {
       drawMissionPanel(
         "TOUR COMPLETE",
-        "Ice scouted, expeditioners delivered, and station cargo safely ashore.",
+        "Ice scouted, expeditioners delivered, cargo moved, and a missing expeditioner rescued.",
         "Excellent flying.",
         "PRESS SPACE FOR TITLE"
       );
@@ -1969,10 +2157,10 @@
       const code = event.code;
       if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
            "KeyA", "KeyD", "KeyW", "KeyS", "KeyE", "KeyH", "Space",
-           "Digit1", "Digit2", "Digit3"].includes(code)) {
+           "Digit1", "Digit2", "Digit3", "Digit4"].includes(code)) {
         event.preventDefault();
       }
-      if (/^Digit[1-3]$/.test(code) && pressed && !event.repeat) {
+      if (/^Digit[1-4]$/.test(code) && pressed && !event.repeat) {
         startLevel(parseInt(code.slice(5), 10) - 1, false);
       } else if (code === "ArrowLeft" || code === "KeyA") input.left = pressed;
       else if (code === "ArrowRight" || code === "KeyD") input.right = pressed;
@@ -2003,6 +2191,7 @@
 
     window.addEventListener("keydown", event => onKey(event, true), { passive: false });
     window.addEventListener("keyup", event => onKey(event, false), { passive: false });
+    canvas.addEventListener("pointermove", aimSpotlight, { passive: true });
     window.addEventListener("blur", clearInput);
     window.addEventListener("resize", resizeCanvas);
 
@@ -2252,6 +2441,32 @@
       result.levelSkip =
         levelIndex === 2 && level.mission === "sling" && gameState === "briefing";
 
+      startLevel(3, true);
+      result.rescueStartsAtStation = helicopter.landed &&
+        helicopter.landedAt === STATION_PAD.name && level.worldMaxX > WORLD_MAX_X;
+      result.rescueObjectiveHidden = activeObjective() === null;
+      setAirborne(RESCUE_PERSON_X, RESCUE_CLEARING_Y + 24, 0.62);
+      settleLanding(RESCUE_CLEARING);
+      result.rescueRequiresSpotlight = !rescueAboard;
+
+      startLevel(3, true);
+      setAirborne(RESCUE_PERSON_X - 40, RESCUE_CLEARING_Y + 30, 0.62);
+      spotlightAimX = RESCUE_PERSON_X;
+      spotlightAimY = RESCUE_CLEARING_Y + 1;
+      simulateFrames(Math.ceil(RESCUE_SPOTLIGHT_TIME / FIXED_DT) + 2);
+      result.rescueLocated = rescueLocated && activeObjective().x === RESCUE_PERSON_X;
+      helicopter.x = RESCUE_PERSON_X;
+      settleLanding(RESCUE_CLEARING);
+      result.rescuePickup = rescueAboard && helicopter.landedAt === RESCUE_CLEARING.name;
+      settleLanding(STATION_PAD);
+      result.rescueComplete = gameState === "levelComplete";
+      onKey(
+        { code: "Digit4", repeat: false, preventDefault: function() {} },
+        true
+      );
+      result.rescueLevelSkip =
+        levelIndex === 3 && level.mission === "rescue" && gameState === "briefing";
+
       result.pass = result.collectiveRaised === 35 &&
         result.collectivePersists &&
         result.landedCyclicLocked &&
@@ -2294,7 +2509,14 @@
         result.slingRetargeted &&
         result.slingComplete &&
         result.distanceLabels &&
-        result.levelSkip;
+        result.levelSkip &&
+        result.rescueStartsAtStation &&
+        result.rescueObjectiveHidden &&
+        result.rescueRequiresSpotlight &&
+        result.rescueLocated &&
+        result.rescuePickup &&
+        result.rescueComplete &&
+        result.rescueLevelSkip;
 
       resetGame(false);
       const report = document.createElement("div");
@@ -2308,7 +2530,7 @@
     resetGame(false);
     if (location.hash === "#test") runSelfTests();
     else {
-      const playHash = /^#play([1-3])$/.exec(location.hash);
+      const playHash = /^#play([1-4])$/.exec(location.hash);
       if (playHash) startLevel(parseInt(playHash[1], 10) - 1, true);
       requestAnimationFrame(frame);
     }
