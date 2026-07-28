@@ -530,16 +530,8 @@
         return;
       }
 
-      const ground = palletSurfaceY(pallet.x);
-      const bottom = pallet.y - PALLET_HEIGHT;
-      const tooHigh = bottom > ground + 0.75;
-      const tooFast = Math.abs(pallet.vx) > 1.5 || Math.abs(pallet.vy) > 1;
-      if (tooHigh || tooFast || palletHitsBuilding()) {
-        replacePallet("LOAD BROKEN — REPLACEMENT READY");
-      } else {
-        pallet.status = "free";
-        setMissionNotice("CAGE RELEASED OUTSIDE CARGO ZONE");
-      }
+      pallet.status = "free";
+      setMissionNotice("CAGE RELEASED — WATCH FOR IMPACT");
     }
 
     function handleLoadKey() {
@@ -635,8 +627,8 @@
         const bottom = pallet.y - PALLET_HEIGHT;
         if (bottom <= surface) {
           const overWater = surface === 0 && !Number.isFinite(solidHeightAt(pallet.x));
-          if (overWater || -pallet.vy > 2.5 || Math.abs(pallet.vx) > 4) {
-            replacePallet();
+          if (pallet.status === "free" || overWater || -pallet.vy > 2.5 || Math.abs(pallet.vx) > 4) {
+            replacePallet("LOAD LOST — REPLACEMENT READY");
           } else {
             pallet.y = surface + PALLET_HEIGHT;
             pallet.vx *= 0.65;
@@ -2231,6 +2223,8 @@
       pallet.vx = 0;
       pallet.vy = 0;
       releasePallet();
+      result.brokenLoadFalls = pallet && pallet.status === "free";
+      simulateFrames(180);
       result.brokenLoadReplaced =
         deliveries === 1 && pallet && pallet.status === "waiting" &&
         pallet.x === PALLET_PICKUP_X;
@@ -2294,6 +2288,7 @@
         result.palletConstrained &&
         result.loadMassApplied &&
         result.validDelivery &&
+        result.brokenLoadFalls &&
         result.brokenLoadReplaced &&
         result.threeDelivered &&
         result.slingRetargeted &&
