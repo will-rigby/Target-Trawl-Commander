@@ -54,6 +54,13 @@
     const ATTITUDE_STIFFNESS = 38;
     const ATTITUDE_DAMPING = 11;
     const MAX_ANGULAR_RATE = 95 * Math.PI / 180;
+    const AUTO_HOVER_MAX_TILT = 25 * Math.PI / 180;
+    const AUTO_HOVER_VELOCITY_DAMPING = 0.055;
+    const AUTO_HOVER_ALTITUDE_RATE = 7;
+    const AUTO_HOVER_ALTITUDE_STIFFNESS = 0.65;
+    const AUTO_HOVER_ALTITUDE_DAMPING = 1.15;
+    const AUTO_HOVER_MAX_CLIMB_ACCEL = 5;
+    const AUTO_HOVER_MAX_DESCENT_ACCEL = 4.5;
     const HORIZONTAL_DRAG = 0.04;
     const HORIZONTAL_QUADRATIC_DRAG = 0.003;
     const VERTICAL_DRAG = 0.065;
@@ -85,6 +92,10 @@
     const STATION_PAD_Y = 12;
     const WORLD_MIN_X = -300;
     const WORLD_MAX_X = 2300;
+    const ISA_SEA_LEVEL_TEMPERATURE = 288.15;
+    const ISA_TEMPERATURE_LAPSE_RATE = 0.0065;
+    const ISA_AIR_GAS_CONSTANT = 287.05;
+    const ISA_TROPOPAUSE_ALTITUDE = 11000;
 
     const SHIP_DECK = { x1: 92, x2: 176, y: SHIP_DECK_Y, name: "RSV NUYINA" };
     const STATION_PAD = { x1: 1768, x2: 1864, y: STATION_PAD_Y, name: "AURORA STATION" };
@@ -166,6 +177,8 @@
     let lastFrame = performance.now();
     let accumulator = 0;
     let testMode = false;
+    let autoHoverEnabled = false;
+    let autoHoverTargetAltitude = 0;
 
     const snow = [];
     const washParticles = [];
@@ -181,6 +194,31 @@
 
     function clamp(value, min, max) {
       return Math.max(min, Math.min(max, value));
+    }
+
+    function barometricPressureRatio(altitude) {
+      const height = Math.max(0, altitude);
+      const exponent = GRAVITY / (ISA_AIR_GAS_CONSTANT * ISA_TEMPERATURE_LAPSE_RATE);
+      const tropopauseTemperature =
+        ISA_SEA_LEVEL_TEMPERATURE - ISA_TEMPERATURE_LAPSE_RATE * ISA_TROPOPAUSE_ALTITUDE;
+      const tropopausePressureRatio = Math.pow(
+        tropopauseTemperature / ISA_SEA_LEVEL_TEMPERATURE,
+        exponent
+      );
+      if (height <= ISA_TROPOPAUSE_ALTITUDE) {
+        return Math.pow(
+          1 - ISA_TEMPERATURE_LAPSE_RATE * height / ISA_SEA_LEVEL_TEMPERATURE,
+          exponent
+        );
+      }
+      return tropopausePressureRatio * Math.exp(
+        -GRAVITY * (height - ISA_TROPOPAUSE_ALTITUDE) /
+        (ISA_AIR_GAS_CONSTANT * tropopauseTemperature)
+      );
+    }
+
+    function availableLiftAccelerationAt(altitude) {
+      return MAX_LIFT_ACCEL * barometricPressureRatio(altitude);
     }
 
     function lerp(a, b, amount) {
@@ -218,6 +256,14 @@
       input.left = input.right = input.up = input.down = input.level = false;
     }
 
+    function setAutoHover(enabled) {
+      autoHoverEnabled = enabled;
+      if (autoHoverEnabled) {
+        autoHoverTargetAltitude = helicopter.y;
+        helicopter.targetAngle = 0;
+      }
+    }
+
     function resetAircraft() {
       helicopter.x = 134;
       helicopter.y = SHIP_DECK_Y + SKID_DROP;
@@ -244,6 +290,8 @@
 
     function resetLevel(nextState) {
       resetAircraft();
+      autoHoverEnabled = false;
+      autoHoverTargetAltitude = helicopter.y;
       cameraX = helicopter.x;
       cameraY = 30;
       crashReason = "";
@@ -620,7 +668,25 @@
     function stepPhysics(dt) {
       if (gameState !== "playing") return;
 
-      if (input.up !== input.down) {
+      const massFactor = loadAttached() ? 1 + LOAD_MASS_RATIO : 1;
+      const availableLiftAcceleration = availableLiftAccelerationAt(helicopter.y);
+
+      if (autoHoverEnabled) {
+        if (input.up !== input.down) {
+          autoHoverTargetAltitude +=
+            (input.up ? 1 : -1) * AUTO_HOVER_ALTITUDE_RATE * dt;
+        }
+        autoHoverTargetAltitude = Math.max(SKID_DROP, autoHoverTargetAltitude);
+        const desiredVerticalAcceleration = clamp(
+          (autoHoverTargetAltitude - helicopter.y) * AUTO_HOVER_ALTITUDE_STIFFNESS -
+          helicopter.vy * AUTO_HOVER_ALTITUDE_DAMPING,
+          -AUTO_HOVER_MAX_DESCENT_ACCEL, AUTO_HOVER_MAX_CLIMB_ACCEL
+        );
+        helicopter.collective = clamp(
+          (GRAVITY + desiredVerticalAcceleration) * massFactor / availableLiftAcceleration,
+          0, 1
+        );
+      } else if (input.up !== input.down) {
         helicopter.collective += (input.up ? 1 : -1) * COLLECTIVE_RATE * dt;
         helicopter.collective = clamp(helicopter.collective, 0, 1);
       }
@@ -632,6 +698,13 @@
       } else {
         if (input.level) {
           helicopter.targetAngle = 0;
+        } else if (autoHoverEnabled) {
+          helicopter.targetAngle = input.right !== input.left ?
+            (input.right ? AUTO_HOVER_MAX_TILT : -AUTO_HOVER_MAX_TILT) :
+            clamp(
+              -helicopter.vx * AUTO_HOVER_VELOCITY_DAMPING,
+              -AUTO_HOVER_MAX_TILT, AUTO_HOVER_MAX_TILT
+            );
         } else if (input.right !== input.left) {
           helicopter.targetAngle +=
             (input.right ? 1 : -1) * CYCLIC_TARGET_RATE * dt;
@@ -650,8 +723,7 @@
         helicopter.angle += helicopter.angularVelocity * dt;
       }
 
-      const massFactor = loadAttached() ? 1 + LOAD_MASS_RATIO : 1;
-      const liftAcceleration = helicopter.collective * MAX_LIFT_ACCEL / massFactor;
+      const liftAcceleration = helicopter.collective * availableLiftAcceleration / massFactor;
       const verticalLift = liftAcceleration * Math.cos(helicopter.angle);
       const horizontalLift = liftAcceleration * Math.sin(helicopter.angle);
 
@@ -674,6 +746,9 @@
         helicopter.vy += (verticalLift - GRAVITY - dragY) * dt;
         helicopter.vx = clamp(helicopter.vx, -MAX_HORIZONTAL_SPEED, MAX_HORIZONTAL_SPEED);
         helicopter.vy = clamp(helicopter.vy, -MAX_VERTICAL_SPEED, MAX_VERTICAL_SPEED);
+        if (Math.abs(helicopter.vx) < 1 && Math.abs(helicopter.angle) <= Math.PI / 180) {
+          helicopter.vx = 0;
+        }
         helicopter.x += helicopter.vx * dt;
         helicopter.y += helicopter.vy * dt;
         checkContact();
@@ -1496,6 +1571,32 @@
       ctx.lineCap = "butt";
     }
 
+    function drawFlightReadout() {
+      const readoutWidth = 126;
+      const readoutHeight = autoHoverEnabled ? 68 : 48;
+      const x = clamp(worldToScreenX(helicopter.x) + 34, 8, viewWidth - readoutWidth - 8);
+      const y = clamp(worldToScreenY(helicopter.y) - 42, 8, viewHeight - readoutHeight - 8);
+      drawRoundedPanel(x, y, readoutWidth, readoutHeight, 7, "rgba(4,18,27,0.84)");
+      ctx.textAlign = "left";
+      ctx.font = "bold 11px Trebuchet MS";
+      ctx.fillStyle = "#e5f6f7";
+      const horizontalDirection = helicopter.vx >= 0 ? ">" : "<";
+      const verticalDirection = helicopter.vy >= 0 ? "+" : "-";
+      ctx.fillText(
+        "H " + horizontalDirection + " " + Math.abs(helicopter.vx).toFixed(1) + " m/s",
+        x + 10, y + 19
+      );
+      ctx.fillText(
+        "V " + verticalDirection + " " + Math.abs(helicopter.vy).toFixed(1) + " m/s",
+        x + 10, y + 38
+      );
+      if (autoHoverEnabled) {
+        ctx.fillStyle = "#7ee7b5";
+        ctx.font = "bold 10px Trebuchet MS";
+        ctx.fillText("AUTO HOVER", x + 10, y + 57);
+      }
+    }
+
     function updateAndDrawSnow(realDt) {
       ctx.fillStyle = "#fff";
       for (const flake of snow) {
@@ -1527,6 +1628,7 @@
       drawSling();
       drawHelicopter();
       updateAndDrawSnow(realDt);
+      drawFlightReadout();
     }
 
     function drawRoundedPanel(x, y, width, height, radius, fill) {
@@ -1654,6 +1756,15 @@
       ctx.fillText("ALT " + Math.max(0, helicopter.y).toFixed(0) + " m", 27, 78);
       ctx.fillText("V/S " + vertical + " " + Math.abs(helicopter.vy).toFixed(1) + " m/s", 118, 78);
 
+      if (autoHoverEnabled) {
+        const hoverBadgeX = Math.max(27, 12 + panelWidth - 132);
+        drawRoundedPanel(hoverBadgeX, 65, 120, 22, 6, "rgba(34,121,87,0.9)");
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#d9ffea";
+        ctx.font = "bold 11px Trebuchet MS";
+        ctx.fillText("AUTO HOVER", hoverBadgeX + 60, 80);
+      }
+
       const objectiveWidth = Math.min(520, viewWidth - 24);
       drawRoundedPanel(12, 104, objectiveWidth, level.mission === "sling" ? 84 : 48, 8,
         "rgba(5,20,29,0.78)");
@@ -1753,7 +1864,7 @@
       ctx.fillText("set collective", viewWidth / 2 + 136, y + 238);
       ctx.fillStyle = "#ffd65a";
       ctx.font = "bold 15px Trebuchet MS";
-      ctx.fillText("HOLD SPACE TO LEVEL", viewWidth / 2, y + 273);
+      ctx.fillText("H: AUTO HOVER     HOLD SPACE: LEVEL", viewWidth / 2, y + 273);
       ctx.font = "bold 20px Trebuchet MS";
       ctx.fillText("PRESS SPACE TO FLY", viewWidth / 2, y + 310);
       ctx.fillStyle = "#9ed5d8";
@@ -1865,7 +1976,7 @@
     function onKey(event, pressed) {
       const code = event.code;
       if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
-           "KeyA", "KeyD", "KeyW", "KeyS", "KeyE", "Space",
+           "KeyA", "KeyD", "KeyW", "KeyS", "KeyE", "KeyH", "Space",
            "Digit1", "Digit2", "Digit3"].includes(code)) {
         event.preventDefault();
       }
@@ -1875,6 +1986,9 @@
       else if (code === "ArrowRight" || code === "KeyD") input.right = pressed;
       else if (code === "ArrowUp" || code === "KeyW") input.up = pressed;
       else if (code === "ArrowDown" || code === "KeyS") input.down = pressed;
+      else if (code === "KeyH" && pressed && !event.repeat && gameState === "playing") {
+        setAutoHover(!autoHoverEnabled);
+      }
       else if (code === "KeyE" && pressed && !event.repeat) handleLoadKey();
       else if (code === "Space") {
         if (gameState === "playing") input.level = pressed;
@@ -1938,6 +2052,8 @@
       helicopter.landed = false;
       helicopter.landedAt = "";
       helicopter.facing = 1;
+      autoHoverEnabled = false;
+      autoHoverTargetAltitude = helicopter.y;
       gameState = "playing";
       clearInput();
     }
@@ -1987,6 +2103,47 @@
       input.level = false;
       result.spaceLevelledDeg =
         Math.round(Math.abs(helicopter.angle * 180 / Math.PI) * 10) / 10;
+
+      setAirborne(700, 100, 0.62);
+      const hoverStartAltitude = helicopter.y;
+      onKey(
+        { code: "KeyH", repeat: false, preventDefault: function() {} },
+        true
+      );
+      result.autoHoverEnabled = autoHoverEnabled &&
+        Math.abs(autoHoverTargetAltitude - hoverStartAltitude) < 0.001;
+      input.right = true;
+      simulateFrames(180);
+      input.right = false;
+      result.autoHoverPitchCapped =
+        Math.abs(helicopter.angle) <= AUTO_HOVER_MAX_TILT + 0.02;
+
+      setAirborne(700, 100, 0.62);
+      setAutoHover(true);
+      helicopter.vx = 8;
+      simulateFrames(600);
+      result.autoHoverBrakes = Math.abs(helicopter.vx) < 0.5;
+      result.autoHoverLevels = Math.abs(helicopter.angle) < 0.02;
+      const targetBeforeClimb = autoHoverTargetAltitude;
+      input.up = true;
+      simulateFrames(60);
+      input.up = false;
+      simulateFrames(240);
+      result.autoHoverClimbTarget = autoHoverTargetAltitude >= targetBeforeClimb + 6.9;
+      result.autoHoverAltitudeHeld =
+        Math.abs(helicopter.y - autoHoverTargetAltitude) < 2;
+
+      result.pressureThrustDrops =
+        availableLiftAccelerationAt(5000) < availableLiftAccelerationAt(0);
+      setAirborne(700, 5000, 1);
+      const highAltitudeStart = helicopter.y;
+      simulateFrames(300);
+      result.highAltitudeCannotHover = helicopter.y < highAltitudeStart - 1;
+
+      setAirborne(700, 100, 0.56);
+      helicopter.vx = 0.6;
+      stepPhysics(FIXED_DT);
+      result.lowSpeedSettles = helicopter.vx === 0;
 
       setAirborne(700, 100, 0.62);
       helicopter.vx = -DIRECTION_FLIP_SPEED - 1;
@@ -2110,6 +2267,15 @@
         result.forwardTravel > 2 &&
         result.unlimitedAngleDeg > 90 &&
         result.spaceLevelledDeg < 1 &&
+        result.autoHoverEnabled &&
+        result.autoHoverPitchCapped &&
+        result.autoHoverLevels &&
+        result.autoHoverBrakes &&
+        result.autoHoverClimbTarget &&
+        result.autoHoverAltitudeHeld &&
+        result.pressureThrustDrops &&
+        result.highAltitudeCannotHover &&
+        result.lowSpeedSettles &&
         result.facesLeftInReverse &&
         result.facesRightForward &&
         result.safeLanding &&
