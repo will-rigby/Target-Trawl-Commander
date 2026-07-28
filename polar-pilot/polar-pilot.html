@@ -97,7 +97,7 @@
     const RESCUE_CLEARING_Y = 18;
     const RESCUE_CLEARING_RADIUS = 18;
     const RESCUE_PICKUP_RADIUS = 13;
-    const SPOTLIGHT_RANGE = 150;
+    const SPOTLIGHT_RANGE = 200;
     const SPOTLIGHT_HALF_ANGLE = 13 * Math.PI / 180;
     const RESCUE_SPOTLIGHT_TIME = 2;
     const ISA_SEA_LEVEL_TEMPERATURE = 288.15;
@@ -1725,7 +1725,7 @@
       const gradient = ctx.createLinearGradient(originX, originY, endX, endY);
       gradient.addColorStop(0, "rgba(255, 250, 202, 0.34)");
       gradient.addColorStop(0.55, "rgba(230, 242, 204, 0.17)");
-      gradient.addColorStop(1, "rgba(190, 220, 186, 0.02)");
+      gradient.addColorStop(0.9, "rgba(190, 220, 186, 0.00)");
       ctx.save();
       ctx.globalCompositeOperation = "screen";
       ctx.fillStyle = gradient;
