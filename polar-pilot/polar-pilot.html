@@ -184,8 +184,9 @@
     let rescueSpotlightTimer = 0;
     let rescueLocated = false;
     let rescueAboard = false;
-    let spotlightAimX = 0;
-    let spotlightAimY = 0;
+    // Unit vector in world space; it holds the spotlight bearing between mouse moves.
+    let spotlightAimX = 1;
+    let spotlightAimY = -0.15;
     let passengersAboard = 0;
     let deliveries = 0;
     let deliveredPallets = [];
@@ -333,8 +334,8 @@
       rescueSpotlightTimer = 0;
       rescueLocated = false;
       rescueAboard = false;
-      spotlightAimX = helicopter.x + 80;
-      spotlightAimY = helicopter.y - 12;
+      spotlightAimX = 1;
+      spotlightAimY = -0.15;
       passengersAboard = level.mission === "passengers" ? 6 : 0;
       deliveries = 0;
       deliveredPallets = [];
@@ -874,24 +875,28 @@
       return (viewHeight * 0.46 - y) / PIXELS_PER_METRE + cameraY;
     }
 
+    function aimSpotlightAt(worldX, worldY) {
+      const aimX = worldX - helicopter.x;
+      const aimY = worldY - (helicopter.y - 1);
+      const aimLength = Math.hypot(aimX, aimY);
+      if (aimLength < 0.01) return;
+      spotlightAimX = aimX / aimLength;
+      spotlightAimY = aimY / aimLength;
+    }
+
     function aimSpotlight(event) {
       const rect = canvas.getBoundingClientRect();
       const screenX = (event.clientX - rect.left) * viewWidth / rect.width;
       const screenY = (event.clientY - rect.top) * viewHeight / rect.height;
-      spotlightAimX = screenToWorldX(screenX);
-      spotlightAimY = screenToWorldY(screenY);
+      aimSpotlightAt(screenToWorldX(screenX), screenToWorldY(screenY));
     }
 
     function isRescueSpotlightOnPerson() {
       if (level.mission !== "rescue") return false;
       const originX = helicopter.x;
       const originY = helicopter.y - 1;
-      const aimX = spotlightAimX - originX;
-      const aimY = spotlightAimY - originY;
-      const aimLength = Math.hypot(aimX, aimY);
-      if (aimLength < 0.01) return false;
-      const directionX = aimX / aimLength;
-      const directionY = aimY / aimLength;
+      const directionX = spotlightAimX;
+      const directionY = spotlightAimY;
       const personX = RESCUE_PERSON_X - originX;
       const personY = RESCUE_CLEARING_Y + 1 - originY;
       const alongBeam = personX * directionX + personY * directionY;
@@ -1711,11 +1716,8 @@
       if (level.mission !== "rescue") return;
       const originX = worldToScreenX(helicopter.x);
       const originY = worldToScreenY(helicopter.y - 1);
-      const aimX = spotlightAimX - helicopter.x;
-      const aimY = spotlightAimY - (helicopter.y - 1);
-      const aimLength = Math.hypot(aimX, aimY) || 1;
-      const directionX = aimX / aimLength;
-      const directionY = -aimY / aimLength;
+      const directionX = spotlightAimX;
+      const directionY = -spotlightAimY;
       const beamLength = SPOTLIGHT_RANGE * PIXELS_PER_METRE;
       const endX = originX + directionX * beamLength;
       const endY = originY + directionY * beamLength;
@@ -2450,9 +2452,13 @@
       result.rescueRequiresSpotlight = !rescueAboard;
 
       startLevel(3, true);
+      const heldSpotlightX = spotlightAimX;
+      const heldSpotlightY = spotlightAimY;
+      helicopter.x += 20;
+      result.spotlightHoldsAngle =
+        spotlightAimX === heldSpotlightX && spotlightAimY === heldSpotlightY;
       setAirborne(RESCUE_PERSON_X - 40, RESCUE_CLEARING_Y + 30, 0.62);
-      spotlightAimX = RESCUE_PERSON_X;
-      spotlightAimY = RESCUE_CLEARING_Y + 1;
+      aimSpotlightAt(RESCUE_PERSON_X, RESCUE_CLEARING_Y + 1);
       simulateFrames(Math.ceil(RESCUE_SPOTLIGHT_TIME / FIXED_DT) + 2);
       result.rescueLocated = rescueLocated && activeObjective().x === RESCUE_PERSON_X;
       helicopter.x = RESCUE_PERSON_X;
@@ -2513,6 +2519,7 @@
         result.rescueStartsAtStation &&
         result.rescueObjectiveHidden &&
         result.rescueRequiresSpotlight &&
+        result.spotlightHoldsAngle &&
         result.rescueLocated &&
         result.rescuePickup &&
         result.rescueComplete &&
