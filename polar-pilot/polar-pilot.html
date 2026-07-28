@@ -71,6 +71,12 @@
     const SAFE_LATERAL_SPEED = 4;
     const SAFE_LANDING_ANGLE = 12 * Math.PI / 180;
     const SAFE_ANGULAR_RATE = 28 * Math.PI / 180;
+    const SKID_HALF_SPAN = 2.7;
+    const SKID_PIVOT_MAX_ANGLE = 18 * Math.PI / 180;
+    const SKID_CONTACT_MAX_ANGLE = 25 * Math.PI / 180;
+    const SKID_PIVOT_MAX_LATERAL_SPEED = 2.5;
+    const SKID_PIVOT_MAX_DESCENT_SPEED = 4;
+    const SKID_PIVOT_MAX_ANGULAR_RATE = 75 * Math.PI / 180;
     const DIRECTION_FLIP_SPEED = 12;
     const SCOUT_X = 650;
     const SCOUT_PEAK_Y = 34;
@@ -84,7 +90,9 @@
     const PALLET_WIDTH = 6;
     const PALLET_HEIGHT = 4;
     const PALLET_PICKUP_X = 76;
-    const CARGO_ZONE = { x1: 1665, x2: 1745 };
+    // Level 3's shore cargo zone is deliberately close to Nuyina: its centre
+    // sits 296 m from the ship helipad centre for a compact sling route.
+    const CARGO_ZONE = { x1: 390, x2: 470 };
     const SKID_DROP = 2.25;
     const HELI_RADIUS = 4.8;
     const PIXELS_PER_METRE = 4;
@@ -97,7 +105,7 @@
     const RESCUE_CLEARING_Y = 18;
     const RESCUE_CLEARING_RADIUS = 18;
     const RESCUE_PICKUP_RADIUS = 13;
-    const SPOTLIGHT_RANGE = 200;
+    const SPOTLIGHT_RANGE = 250;
     const SPOTLIGHT_HALF_ANGLE = 13 * Math.PI / 180;
     const RESCUE_SPOTLIGHT_TIME = 2;
     const ISA_SEA_LEVEL_TEMPERATURE = 288.15;
@@ -106,6 +114,9 @@
     const ISA_TROPOPAUSE_ALTITUDE = 11000;
 
     const SHIP_DECK = { x1: 92, x2: 176, y: SHIP_DECK_Y, name: "RSV NUYINA" };
+    // The whole exposed stern deck can support a gentle skid contact; the smaller
+    // SHIP_DECK area remains the visual landing-pad target and mission objective.
+    const SHIP_DECK_CONTACT = { x1: 58, x2: 196, y: SHIP_DECK_Y, name: SHIP_DECK.name };
     const STATION_PAD = { x1: 1768, x2: 1864, y: STATION_PAD_Y, name: "AURORA STATION" };
     const BUILDINGS = [
       { x1: 1900, x2: 1955, y1: 5, y2: 28 },
@@ -142,7 +153,7 @@
         mission: "sling",
         station: true,
         worldMaxX: 2300,
-        brief: "Sling three cage pallets to the station cargo zone, then return and land aboard Nuyina.",
+        brief: "Sling three cage pallets to the nearby shore cargo zone, then return and land aboard Nuyina.",
       },
       {
         number: 4,
@@ -399,7 +410,7 @@
     }
 
     function landingSurfaceAt(x) {
-      if (x >= SHIP_DECK.x1 && x <= SHIP_DECK.x2) return SHIP_DECK;
+      if (x >= SHIP_DECK_CONTACT.x1 && x <= SHIP_DECK_CONTACT.x2) return SHIP_DECK_CONTACT;
       if (level.station && x >= STATION_PAD.x1 && x <= STATION_PAD.x2) return STATION_PAD;
       if (level.mission === "rescue" && x >= RESCUE_CLEARING.x1 && x <= RESCUE_CLEARING.x2) {
         return RESCUE_CLEARING;
@@ -464,12 +475,12 @@
       helicopter.angularVelocity = 0;
       helicopter.landed = true;
       helicopter.landedAt = surface.name;
-      if (level.mission === "scout" && icebergScouted && surface === SHIP_DECK) {
+      if (level.mission === "scout" && icebergScouted && surface.name === SHIP_DECK.name) {
         completeLevel();
       } else if (level.mission === "passengers" && surface === STATION_PAD) {
         passengersAboard = 0;
         completeLevel();
-      } else if (level.mission === "sling" && deliveries === 3 && surface === SHIP_DECK) {
+      } else if (level.mission === "sling" && deliveries === 3 && surface.name === SHIP_DECK.name) {
         completeLevel();
       } else if (level.mission === "rescue") {
         if (surface === RESCUE_CLEARING && rescueLocated && !rescueAboard &&
@@ -480,6 +491,23 @@
           completeLevel();
         }
       }
+    }
+
+    function holdOnSkids(surface) {
+      // Keep the lower skid on the surface while the aircraft gently rocks.
+      helicopter.y = surface.y + SKID_DROP * Math.cos(helicopter.angle) +
+        SKID_HALF_SPAN * Math.abs(Math.sin(helicopter.angle));
+      helicopter.vx = 0;
+      helicopter.vy = 0;
+      helicopter.landed = true;
+      helicopter.landedAt = surface.name;
+    }
+
+    function canRockOnSkids() {
+      return Math.abs(helicopter.angle) <= SKID_CONTACT_MAX_ANGLE &&
+        Math.abs(helicopter.vx) <= SKID_PIVOT_MAX_LATERAL_SPEED &&
+        -helicopter.vy <= SKID_PIVOT_MAX_DESCENT_SPEED &&
+        Math.abs(helicopter.angularVelocity) <= SKID_PIVOT_MAX_ANGULAR_RATE;
     }
 
     function checkContact() {
@@ -496,6 +524,7 @@
           Math.abs(helicopter.angle) <= SAFE_LANDING_ANGLE &&
           Math.abs(helicopter.angularVelocity) <= SAFE_ANGULAR_RATE;
         if (safe) settleLanding(landingSurface);
+        else if (canRockOnSkids()) holdOnSkids(landingSurface);
         else crash("Hard landing — lower the collective earlier and touch down level.");
         return;
       }
@@ -753,37 +782,37 @@
         helicopter.collective = clamp(helicopter.collective, 0, 1);
       }
 
-      if (helicopter.landed) {
-        helicopter.angle = 0;
+      const onSkids = helicopter.landed;
+      if (input.level || (onSkids && input.left === input.right)) {
         helicopter.targetAngle = 0;
-        helicopter.angularVelocity = 0;
-      } else {
-        if (input.level) {
-          helicopter.targetAngle = 0;
-        } else if (autoHoverEnabled) {
-          helicopter.targetAngle = input.right !== input.left ?
-            (input.right ? AUTO_HOVER_MAX_TILT : -AUTO_HOVER_MAX_TILT) :
-            clamp(
-              -helicopter.vx * AUTO_HOVER_VELOCITY_DAMPING,
-              -AUTO_HOVER_MAX_TILT, AUTO_HOVER_MAX_TILT
-            );
-        } else if (input.right !== input.left) {
-          helicopter.targetAngle +=
-            (input.right ? 1 : -1) * CYCLIC_TARGET_RATE * dt;
-        }
-
-        if (helicopter.vx <= -DIRECTION_FLIP_SPEED) helicopter.facing = -1;
-        else if (helicopter.vx >= DIRECTION_FLIP_SPEED) helicopter.facing = 1;
-
-        const angularAcceleration =
-          (helicopter.targetAngle - helicopter.angle) * ATTITUDE_STIFFNESS -
-          helicopter.angularVelocity * ATTITUDE_DAMPING;
-        helicopter.angularVelocity += angularAcceleration * dt;
-        helicopter.angularVelocity = clamp(
-          helicopter.angularVelocity, -MAX_ANGULAR_RATE, MAX_ANGULAR_RATE
-        );
-        helicopter.angle += helicopter.angularVelocity * dt;
+      } else if (autoHoverEnabled) {
+        helicopter.targetAngle = input.right !== input.left ?
+          (input.right ? AUTO_HOVER_MAX_TILT : -AUTO_HOVER_MAX_TILT) :
+          clamp(
+            -helicopter.vx * AUTO_HOVER_VELOCITY_DAMPING,
+            -AUTO_HOVER_MAX_TILT, AUTO_HOVER_MAX_TILT
+          );
+      } else if (input.right !== input.left) {
+        helicopter.targetAngle +=
+          (input.right ? 1 : -1) * CYCLIC_TARGET_RATE * dt;
       }
+      if (onSkids) {
+        helicopter.targetAngle = clamp(
+          helicopter.targetAngle, -SKID_PIVOT_MAX_ANGLE, SKID_PIVOT_MAX_ANGLE
+        );
+      }
+
+      if (helicopter.vx <= -DIRECTION_FLIP_SPEED) helicopter.facing = -1;
+      else if (helicopter.vx >= DIRECTION_FLIP_SPEED) helicopter.facing = 1;
+
+      const angularAcceleration =
+        (helicopter.targetAngle - helicopter.angle) * ATTITUDE_STIFFNESS -
+        helicopter.angularVelocity * ATTITUDE_DAMPING;
+      helicopter.angularVelocity += angularAcceleration * dt;
+      helicopter.angularVelocity = clamp(
+        helicopter.angularVelocity, -MAX_ANGULAR_RATE, MAX_ANGULAR_RATE
+      );
+      helicopter.angle += helicopter.angularVelocity * dt;
 
       const liftAcceleration = helicopter.collective * availableLiftAcceleration / massFactor;
       const verticalLift = liftAcceleration * Math.cos(helicopter.angle);
@@ -792,9 +821,7 @@
       if (helicopter.landed) {
         const landedSurface = helicopter.landedAt === STATION_PAD.name ? STATION_PAD :
           helicopter.landedAt === RESCUE_CLEARING.name ? RESCUE_CLEARING : SHIP_DECK;
-        helicopter.y = landedSurface.y + SKID_DROP;
-        helicopter.vx = 0;
-        helicopter.vy = 0;
+        holdOnSkids(landedSurface);
         if (verticalLift > GRAVITY * 1.02) {
           helicopter.landed = false;
           helicopter.landedAt = "";
@@ -1698,10 +1725,76 @@
       }
     }
 
+    function clipSpotlightPolygon(points) {
+      const clipEdge = (source, axis, boundary, keepGreater) => {
+        const clipped = [];
+        for (let i = 0; i < source.length; i++) {
+          const previous = source[(i + source.length - 1) % source.length];
+          const current = source[i];
+          const previousInside = keepGreater ? previous[axis] >= boundary : previous[axis] <= boundary;
+          const currentInside = keepGreater ? current[axis] >= boundary : current[axis] <= boundary;
+          if (previousInside !== currentInside) {
+            const t = (boundary - previous[axis]) / (current[axis] - previous[axis]);
+            clipped.push({
+              x: previous.x + (current.x - previous.x) * t,
+              y: previous.y + (current.y - previous.y) * t,
+            });
+          }
+          if (currentInside) clipped.push(current);
+        }
+        return clipped;
+      };
+      let clipped = clipEdge(points, "x", 0, true);
+      clipped = clipEdge(clipped, "x", viewWidth, false);
+      clipped = clipEdge(clipped, "y", 0, true);
+      return clipEdge(clipped, "y", viewHeight, false);
+    }
+
+    function spotlightGeometry() {
+      const originX = worldToScreenX(helicopter.x);
+      const originY = worldToScreenY(helicopter.y - 1);
+      const directionX = spotlightAimX;
+      const directionY = -spotlightAimY;
+      const edgeDistances = [];
+      if (directionX > 0) edgeDistances.push((viewWidth - originX) / directionX);
+      else if (directionX < 0) edgeDistances.push(-originX / directionX);
+      if (directionY > 0) edgeDistances.push((viewHeight - originY) / directionY);
+      else if (directionY < 0) edgeDistances.push(-originY / directionY);
+      const beamLength = Math.max(1, Math.min(...edgeDistances.filter(distance => distance > 0)));
+      const endX = originX + directionX * beamLength;
+      const endY = originY + directionY * beamLength;
+      const perpendicularX = -directionY;
+      const perpendicularY = directionX;
+      const coneLength = Math.hypot(viewWidth, viewHeight) * 2;
+      const coneHalfWidth = Math.tan(SPOTLIGHT_HALF_ANGLE) * coneLength;
+      const farX = originX + directionX * coneLength;
+      const farY = originY + directionY * coneLength;
+      const polygon = clipSpotlightPolygon([
+        { x: originX, y: originY },
+        { x: farX + perpendicularX * coneHalfWidth, y: farY + perpendicularY * coneHalfWidth },
+        { x: farX - perpendicularX * coneHalfWidth, y: farY - perpendicularY * coneHalfWidth },
+      ]);
+      return { originX, originY, endX, endY, polygon };
+    }
+
+    function drawSpotlightConePath(beam) {
+      if (!beam.polygon.length) return;
+      ctx.moveTo(beam.polygon[0].x, beam.polygon[0].y);
+      for (let i = 1; i < beam.polygon.length; i++) {
+        ctx.lineTo(beam.polygon[i].x, beam.polygon[i].y);
+      }
+      ctx.closePath();
+    }
+
     function drawNightVeil() {
       if (level.mission !== "rescue") return;
-      ctx.fillStyle = "rgba(1, 8, 22, 0.76)";
-      ctx.fillRect(0, 0, viewWidth, viewHeight);
+      const beam = spotlightGeometry();
+      ctx.fillStyle = "rgba(1, 8, 22, 0.82)";
+      ctx.beginPath();
+      ctx.rect(0, 0, viewWidth, viewHeight);
+      drawSpotlightConePath(beam);
+      ctx.fill("evenodd");
+
       ctx.fillStyle = "rgba(224, 239, 255, 0.75)";
       for (let i = 0; i < 34; i++) {
         const x = (i * 83 + 41) % viewWidth;
@@ -1714,35 +1807,21 @@
 
     function drawSpotlight() {
       if (level.mission !== "rescue") return;
-      const originX = worldToScreenX(helicopter.x);
-      const originY = worldToScreenY(helicopter.y - 1);
-      const directionX = spotlightAimX;
-      const directionY = -spotlightAimY;
-      const beamLength = SPOTLIGHT_RANGE * PIXELS_PER_METRE;
-      const endX = originX + directionX * beamLength;
-      const endY = originY + directionY * beamLength;
-      const perpendicularX = -directionY;
-      const perpendicularY = directionX;
-      const endHalfWidth = Math.tan(SPOTLIGHT_HALF_ANGLE) * beamLength;
-      const gradient = ctx.createLinearGradient(originX, originY, endX, endY);
-      gradient.addColorStop(0, "rgba(255, 250, 202, 0.34)");
-      gradient.addColorStop(0.55, "rgba(230, 242, 204, 0.17)");
-      gradient.addColorStop(0.9, "rgba(190, 220, 186, 0.00)");
+      const beam = spotlightGeometry();
+      const gradient = ctx.createLinearGradient(beam.originX, beam.originY, beam.endX, beam.endY);
+      gradient.addColorStop(0, "rgba(255, 232, 142, 0.32)");
+      gradient.addColorStop(0.45, "rgba(214, 176, 72, 0.14)");
+      gradient.addColorStop(0.9, "rgba(0, 0, 0, 0.0)");
       ctx.save();
-      ctx.globalCompositeOperation = "screen";
       ctx.fillStyle = gradient;
       ctx.beginPath();
-      ctx.moveTo(originX, originY);
-      ctx.lineTo(endX + perpendicularX * endHalfWidth, endY + perpendicularY * endHalfWidth);
-      ctx.lineTo(endX - perpendicularX * endHalfWidth, endY - perpendicularY * endHalfWidth);
-      ctx.closePath();
+      drawSpotlightConePath(beam);
       ctx.fill();
       ctx.restore();
     }
 
     function drawRescueExpeditioner() {
-      if (level.mission !== "rescue" || rescueAboard ||
-          (!rescueLocated && !isRescueSpotlightOnPerson())) return;
+      if (level.mission !== "rescue" || rescueAboard) return;
       const x = worldToScreenX(RESCUE_PERSON_X);
       const y = worldToScreenY(RESCUE_CLEARING_Y);
       ctx.save();
@@ -1783,10 +1862,10 @@
       drawWash();
       drawShadow();
       drawSling();
+      drawRescueExpeditioner();
       updateAndDrawSnow(realDt);
       drawNightVeil();
       drawSpotlight();
-      drawRescueExpeditioner();
       drawHelicopter();
       drawFlightReadout();
     }
@@ -2248,9 +2327,26 @@
       resetGame(true);
       input.right = true;
       simulateFrames(60);
-      result.landedCyclicLocked =
-        helicopter.angle === 0 && helicopter.targetAngle === 0 &&
-        helicopter.angularVelocity === 0;
+      result.landedCyclicPivots = helicopter.angle > 0.04 &&
+        helicopter.angle <= SKID_PIVOT_MAX_ANGLE + 0.01;
+      input.right = false;
+      simulateFrames(120);
+      result.landedCyclicReturnsLevel = Math.abs(helicopter.angle) < 0.02 &&
+        Math.abs(helicopter.angularVelocity) < 0.02;
+
+      resetGame(true);
+      helicopter.collective = 0.78;
+      input.right = true;
+      simulateFrames(20);
+      result.tiltedSkidTakeoff = !helicopter.landed && gameState === "playing" &&
+        Math.abs(helicopter.angle) <= SKID_PIVOT_MAX_ANGLE + 0.08;
+
+      setAirborne(70, SHIP_DECK_Y + SKID_DROP + 0.01, 0.3);
+      helicopter.angle = 20 * Math.PI / 180;
+      helicopter.vy = -1;
+      stepPhysics(FIXED_DT);
+      result.tiltedDeckLanding = helicopter.landed && gameState === "playing" &&
+        Math.abs(helicopter.angle) <= SKID_CONTACT_MAX_ANGLE;
 
       resetGame(true);
       input.up = true;
@@ -2475,7 +2571,10 @@
 
       result.pass = result.collectiveRaised === 35 &&
         result.collectivePersists &&
-        result.landedCyclicLocked &&
+        result.landedCyclicPivots &&
+        result.landedCyclicReturnsLevel &&
+        result.tiltedSkidTakeoff &&
+        result.tiltedDeckLanding &&
         result.climbed > 3 &&
         result.heldAngleDeg >= 20 &&
         result.angleHeld &&
