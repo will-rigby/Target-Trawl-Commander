@@ -100,6 +100,10 @@
     const HELI_RADIUS = 4.8;
     const PIXELS_PER_METRE = 4;
     const SHIP_DECK_Y = 13.488146;
+    const SHIP_SWELL_AMPLITUDE = 1.5;
+    const SHIP_SWELL_PERIOD = 8;
+    const MEDICAL_WIND_BASE_ACCEL = 1.15;
+    const MEDICAL_WIND_GUST_ACCEL = 0.5;
     const STATION_PAD_Y = 4.2;
     const WORLD_MIN_X = -300;
     const WORLD_MAX_X = 1025;
@@ -119,8 +123,11 @@
     // SVG coordinate metadata: 1 SVG pixel equals 1 metre and y=0 is the waterline.
     const NUYINA_SVG_WIDTH = 160;
     const NUYINA_SVG_HEIGHT = 100;
-    const NUYINA_HELIPAD_SVG = { x1: 131.00272, x2: 159.525221, y: 13.488146 };
-    const NUYINA_CARGO_PAD_SVG = { x1: 120.77345, x2: 130.7372438, y: 13.519649 };
+    // The artwork was repositioned 9.45 m upward inside its SVG page; offset it
+    // back down at draw time so the ship waterline remains world y=0.
+    const NUYINA_ARTWORK_Y_OFFSET = -9.45;
+    const NUYINA_HELIPAD_SVG = { x1: 131.21849, x2: 159.740991, y: 13.488146 };
+    const NUYINA_CARGO_PAD_SVG = { x1: 120.98923, x2: 130.9530238, y: 13.519649 };
     const NUYINA_WORLD_X = 134 -
       (NUYINA_HELIPAD_SVG.x1 + NUYINA_HELIPAD_SVG.x2) / 2;
     const SHIP_DECK = {
@@ -197,6 +204,14 @@
         worldMaxX: 2125,
         brief: "A missing expeditioner is somewhere east of Aurora Station. Search the dark terrain with the mouse-aimed spotlight, land beside them, then return to station.",
       },
+      {
+        number: 5,
+        name: "Windy Medical Rescue",
+        mission: "medical",
+        station: true,
+        worldMaxX: WORLD_MAX_X,
+        brief: "A patient is waiting at Aurora Station. Fly through the crosswind, land to board them, then return to Nuyina's moving deck for treatment.",
+      },
     ];
 
     const input = {
@@ -229,6 +244,7 @@
     let rescueSpotlightTimer = 0;
     let rescueLocated = false;
     let rescueAboard = false;
+    let patientAboard = false;
     // Unit vector in world space; it holds the spotlight bearing between mouse moves.
     let spotlightAimX = 1;
     let spotlightAimY = -0.15;
@@ -298,6 +314,50 @@
       return a + (b - a) * amount;
     }
 
+    function shipSwellOffset() {
+      if (!level || level.mission !== "medical") return 0;
+      return SHIP_SWELL_AMPLITUDE * Math.sin(Math.PI * 2 * elapsed / SHIP_SWELL_PERIOD);
+    }
+
+    function shipDeckY() {
+      return SHIP_DECK_Y + shipSwellOffset();
+    }
+
+    function shipDeckVelocity() {
+      if (!level || level.mission !== "medical") return 0;
+      return SHIP_SWELL_AMPLITUDE * Math.PI * 2 / SHIP_SWELL_PERIOD *
+        Math.cos(Math.PI * 2 * elapsed / SHIP_SWELL_PERIOD);
+    }
+
+    function shipDeckSurface() {
+      return {
+        x1: SHIP_DECK_CONTACT.x1,
+        x2: SHIP_DECK_CONTACT.x2,
+        y: shipDeckY(),
+        name: SHIP_DECK.name,
+      };
+    }
+
+    function shipCargoPadY() {
+      return SHIP_CARGO_PAD.y + shipSwellOffset();
+    }
+
+    function surfaceVerticalVelocity(surface) {
+      return surface && surface.name === SHIP_DECK.name ? shipDeckVelocity() : 0;
+    }
+
+    function medicalWindAcceleration() {
+      if (!level || level.mission !== "medical") return 0;
+      return MEDICAL_WIND_BASE_ACCEL +
+        MEDICAL_WIND_GUST_ACCEL * Math.sin(elapsed * 0.9) +
+        MEDICAL_WIND_GUST_ACCEL * 0.45 * Math.sin(elapsed * 2.1 + 0.7);
+    }
+
+    function medicalWindSpeed() {
+      if (!level || level.mission !== "medical") return 0;
+      return 12 + 3.5 * Math.sin(elapsed * 0.9) + 1.6 * Math.sin(elapsed * 2.1 + 0.7);
+    }
+
     function resizeCanvas() {
       viewWidth = Math.max(320, window.innerWidth);
       viewHeight = Math.max(420, window.innerHeight);
@@ -339,7 +399,7 @@
 
     function resetAircraft() {
       helicopter.x = 134;
-      helicopter.y = SHIP_DECK_Y + SKID_DROP;
+      helicopter.y = shipDeckY() + SKID_DROP;
       helicopter.vx = 0;
       helicopter.vy = 0;
       helicopter.angle = 0;
@@ -359,7 +419,7 @@
     function spawnPallet() {
       pallet = {
         x: PALLET_PICKUP_X,
-        y: SHIP_CARGO_PAD.y + PALLET_HEIGHT,
+        y: shipCargoPadY() + PALLET_HEIGHT,
         vx: 0,
         vy: 0,
         status: "waiting", // waiting | attached | free
@@ -367,18 +427,19 @@
     }
 
     function resetLevel(nextState) {
+      elapsed = 0;
       resetAircraft();
       autoHoverEnabled = false;
       autoHoverTargetAltitude = helicopter.y;
       cameraX = helicopter.x;
       cameraY = 30;
       crashReason = "";
-      elapsed = 0;
       scoutTimer = 0;
       icebergScouted = false;
       rescueSpotlightTimer = 0;
       rescueLocated = false;
       rescueAboard = false;
+      patientAboard = false;
       spotlightAimX = 1;
       spotlightAimY = -0.15;
       passengersAboard = level.mission === "passengers" ? 6 : 0;
@@ -445,7 +506,7 @@
     }
 
     function landingSurfaceAt(x) {
-      if (x >= SHIP_DECK_CONTACT.x1 && x <= SHIP_DECK_CONTACT.x2) return SHIP_DECK_CONTACT;
+      if (x >= SHIP_DECK_CONTACT.x1 && x <= SHIP_DECK_CONTACT.x2) return shipDeckSurface();
       if (level.station && x >= STATION_PAD.x1 && x <= STATION_PAD.x2) return STATION_PAD;
       if (level.mission === "rescue" && x >= RESCUE_CLEARING.x1 && x <= RESCUE_CLEARING.x2) {
         return RESCUE_CLEARING;
@@ -455,10 +516,10 @@
 
     function solidHeightAt(x) {
       if (x >= SHIP_SUPERSTRUCTURE.x1 && x <= SHIP_SUPERSTRUCTURE.x2) {
-        return SHIP_SUPERSTRUCTURE.y;
+        return SHIP_SUPERSTRUCTURE.y + shipSwellOffset();
       }
       if (x >= SHIP_DECK_CONTACT.x1 && x <= SHIP_DECK_CONTACT.x2) {
-        return SHIP_DECK_Y;
+        return shipDeckY();
       }
       return Math.max(iceHeightAt(x), icebergHeightAt(x));
     }
@@ -505,7 +566,7 @@
     function settleLanding(surface) {
       helicopter.y = surface.y + SKID_DROP;
       helicopter.vx = 0;
-      helicopter.vy = 0;
+      helicopter.vy = surfaceVerticalVelocity(surface);
       helicopter.angle = 0;
       helicopter.targetAngle = 0;
       helicopter.angularVelocity = 0;
@@ -526,6 +587,13 @@
         } else if (surface === STATION_PAD && rescueAboard) {
           completeLevel();
         }
+      } else if (level.mission === "medical") {
+        if (surface === STATION_PAD && !patientAboard) {
+          patientAboard = true;
+          setMissionNotice("PATIENT ABOARD - RETURN TO NUYINA");
+        } else if (surface.name === SHIP_DECK.name && patientAboard) {
+          completeLevel();
+        }
       }
     }
 
@@ -534,15 +602,16 @@
       helicopter.y = surface.y + SKID_DROP * Math.cos(helicopter.angle) +
         SKID_HALF_SPAN * Math.abs(Math.sin(helicopter.angle));
       helicopter.vx = 0;
-      helicopter.vy = 0;
+      helicopter.vy = surfaceVerticalVelocity(surface);
       helicopter.landed = true;
       helicopter.landedAt = surface.name;
     }
 
-    function canRockOnSkids() {
+    function canRockOnSkids(surface) {
+      const relativeVerticalSpeed = helicopter.vy - surfaceVerticalVelocity(surface);
       return Math.abs(helicopter.angle) <= SKID_CONTACT_MAX_ANGLE &&
         Math.abs(helicopter.vx) <= SKID_PIVOT_MAX_LATERAL_SPEED &&
-        -helicopter.vy <= SKID_PIVOT_MAX_DESCENT_SPEED &&
+        -relativeVerticalSpeed <= SKID_PIVOT_MAX_DESCENT_SPEED &&
         Math.abs(helicopter.angularVelocity) <= SKID_PIVOT_MAX_ANGULAR_RATE;
     }
 
@@ -554,13 +623,15 @@
 
       const skidAltitude = lowestSkidAltitude();
       const landingSurface = landingSurfaceAt(helicopter.x);
-      if (landingSurface && skidAltitude <= landingSurface.y + 0.03 && helicopter.vy <= 0) {
-        const safe = -helicopter.vy <= SAFE_DESCENT_SPEED &&
+      const surfaceVelocity = surfaceVerticalVelocity(landingSurface);
+      const relativeVerticalSpeed = helicopter.vy - surfaceVelocity;
+      if (landingSurface && skidAltitude <= landingSurface.y + 0.03 && relativeVerticalSpeed <= 0) {
+        const safe = -relativeVerticalSpeed <= SAFE_DESCENT_SPEED &&
           Math.abs(helicopter.vx) <= SAFE_LATERAL_SPEED &&
           Math.abs(helicopter.angle) <= SAFE_LANDING_ANGLE &&
           Math.abs(helicopter.angularVelocity) <= SAFE_ANGULAR_RATE;
         if (safe) settleLanding(landingSurface);
-        else if (canRockOnSkids()) holdOnSkids(landingSurface);
+        else if (canRockOnSkids(landingSurface)) holdOnSkids(landingSurface);
         else crash("Hard landing — lower the collective earlier and touch down level.");
         return;
       }
@@ -860,19 +931,19 @@
 
       if (helicopter.landed) {
         const landedSurface = helicopter.landedAt === STATION_PAD.name ? STATION_PAD :
-          helicopter.landedAt === RESCUE_CLEARING.name ? RESCUE_CLEARING : SHIP_DECK;
+          helicopter.landedAt === RESCUE_CLEARING.name ? RESCUE_CLEARING : shipDeckSurface();
         holdOnSkids(landedSurface);
         if (verticalLift > GRAVITY * 1.02) {
           helicopter.landed = false;
           helicopter.landedAt = "";
-          helicopter.vy = 0.08;
+          helicopter.vy = surfaceVerticalVelocity(landedSurface) + 0.08;
         }
       } else {
         const dragX = HORIZONTAL_DRAG * helicopter.vx +
           HORIZONTAL_QUADRATIC_DRAG * helicopter.vx * Math.abs(helicopter.vx);
         const dragY = VERTICAL_DRAG * helicopter.vy +
           VERTICAL_QUADRATIC_DRAG * helicopter.vy * Math.abs(helicopter.vy);
-        helicopter.vx += (horizontalLift - dragX) * dt;
+        helicopter.vx += (horizontalLift + medicalWindAcceleration() - dragX) * dt;
         helicopter.vy += (verticalLift - GRAVITY - dragY) * dt;
         helicopter.vx = clamp(helicopter.vx, -MAX_HORIZONTAL_SPEED, MAX_HORIZONTAL_SPEED);
         helicopter.vy = clamp(helicopter.vy, -MAX_VERTICAL_SPEED, MAX_VERTICAL_SPEED);
@@ -1157,7 +1228,8 @@
       const height = NUYINA_SVG_HEIGHT * PIXELS_PER_METRE;
       ctx.drawImage(
         nuyinaImage,
-        worldToScreenX(NUYINA_WORLD_X), worldToScreenY(0) - height,
+        worldToScreenX(NUYINA_WORLD_X),
+        worldToScreenY(shipSwellOffset() + NUYINA_ARTWORK_Y_OFFSET) - height,
         width, height
       );
     }
@@ -1237,6 +1309,10 @@
         for (let i = 0; i < 6; i++) {
           drawExpeditioner(STATION_PAD.x2 + 18 + i * 4.5, STATION_PAD_Y + 0.2, i % 2);
         }
+      }
+
+      if (level.mission === "medical" && !patientAboard) {
+        drawExpeditioner((STATION_PAD.x1 + STATION_PAD.x2) / 2, STATION_PAD_Y + 0.2, 1);
       }
     }
 
@@ -1684,7 +1760,7 @@
     function updateAndDrawSnow(realDt) {
       ctx.fillStyle = "#fff";
       for (const flake of snow) {
-        flake.x += flake.drift * realDt;
+        flake.x += (flake.drift + medicalWindSpeed() * PIXELS_PER_METRE) * realDt;
         flake.y += flake.speed * realDt;
         if (flake.y > viewHeight + 4) {
           flake.y = -4;
@@ -1702,10 +1778,10 @@
     function drawWorld(realDt) {
       drawSky();
       drawMountains();
+      drawNuyina();
       drawWater();
       drawIce();
       drawIceberg();
-      drawNuyina();
       drawStation();
       drawWash();
       drawShadow();
@@ -1739,6 +1815,8 @@
         if (rescueLocated) return "Land beside the located expeditioner";
         return "Search east of station with the spotlight";
       }
+      if (level.mission === "medical") return patientAboard ?
+        "Return the patient to Nuyina for treatment" : "Land on Aurora Station helipad to board the patient";
       if (deliveries >= 3) return "Return to Nuyina and land";
       if (loadAttached()) return "Place cage " + (deliveries + 1) + " in the station cargo zone";
       return "Pick up cage " + (deliveries + 1) + " of 3";
@@ -1747,7 +1825,7 @@
     function activeObjective() {
       if (level.mission === "scout") {
         return icebergScouted ?
-          { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: SHIP_DECK.y } :
+          { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: shipDeckY() } :
           { x: SCOUT_X, y: SCOUT_PEAK_Y + 28 };
       }
       if (level.mission === "passengers") {
@@ -1757,8 +1835,13 @@
         if (rescueAboard) return { x: (STATION_PAD.x1 + STATION_PAD.x2) / 2, y: STATION_PAD.y };
         return rescueLocated ? { x: RESCUE_PERSON_X, y: RESCUE_CLEARING_Y } : null;
       }
+      if (level.mission === "medical") {
+        return patientAboard ?
+          { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: shipDeckY() } :
+          { x: (STATION_PAD.x1 + STATION_PAD.x2) / 2, y: STATION_PAD.y };
+      }
       if (deliveries >= 3) {
-        return { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: SHIP_DECK.y };
+        return { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: shipDeckY() };
       }
       if (loadAttached()) {
         return {
@@ -1863,7 +1946,7 @@
 
       const objectiveWidth = Math.min(520, viewWidth - 24);
       const objectiveHeight = level.mission === "sling" ? 84 :
-        level.mission === "rescue" || level.mission === "scout" ? 68 : 48;
+        level.mission === "rescue" || level.mission === "scout" || level.mission === "medical" ? 68 : 48;
       drawRoundedPanel(12, 104, objectiveWidth, objectiveHeight, 8,
         "rgba(5,20,29,0.78)");
       ctx.textAlign = "left";
@@ -1922,6 +2005,15 @@
         );
       }
 
+      if (level.mission === "medical") {
+        ctx.fillStyle = "#b8dce8";
+        ctx.font = "12px Trebuchet MS";
+        ctx.fillText(
+          "WIND → " + medicalWindSpeed().toFixed(1) + " m/s   ·   DECK SWELL ±1.5 m",
+          25, 165
+        );
+      }
+
       if (missionNotice) {
         const noticeWidth = Math.min(480, viewWidth - 30);
         drawRoundedPanel(
@@ -1974,11 +2066,11 @@
       ctx.fillText("POLAR PILOT", viewWidth / 2, y + 90);
       ctx.fillStyle = "#cde7e9";
       ctx.font = "bold 17px Trebuchet MS";
-      ctx.fillText("FOUR ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
+      ctx.fillText("FIVE ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
 
       ctx.fillStyle = "#fff";
       ctx.font = "16px Trebuchet MS";
-      ctx.fillText("Scout ice, carry expeditioners, and fly sling loads", viewWidth / 2, y + 172);
+      ctx.fillText("Scout ice, carry people and cargo, and master rescue flights", viewWidth / 2, y + 172);
       ctx.fillStyle = "#9ed5d8";
       ctx.fillText("LEFT / RIGHT · A / D", viewWidth / 2 - 136, y + 215);
       ctx.fillText("UP / DOWN · W / S", viewWidth / 2 + 136, y + 215);
@@ -1993,7 +2085,7 @@
       ctx.fillText("PRESS SPACE TO FLY", viewWidth / 2, y + 310);
       ctx.fillStyle = "#9ed5d8";
       ctx.font = "bold 12px Trebuchet MS";
-      ctx.fillText("1-4: JUMP TO LEVEL", viewWidth / 2, y + 335);
+      ctx.fillText("1-5: JUMP TO LEVEL", viewWidth / 2, y + 335);
     }
 
     function drawBriefing() {
@@ -2004,6 +2096,8 @@
           "E deploys or retracts the line and releases an attached cage." :
           level.mission === "rescue" ?
             "Aim the spotlight with the mouse and hold it on the person for two seconds." :
+          level.mission === "medical" ?
+            "Wind pushes the aircraft east. Time your return landing to the moving deck." :
             "Follow the yellow objective chevron.",
         "PRESS SPACE TO BEGIN"
       );
@@ -2015,6 +2109,7 @@
       else if (level.mission === "passengers") message = "All six expeditioners are safely ashore.";
       else if (level.mission === "sling") message = "Three cages delivered and aircraft returned to Nuyina.";
       else if (level.mission === "rescue") message = "The missing expeditioner is safely back at Aurora Station.";
+      else if (level.mission === "medical") message = "The patient is aboard Nuyina and receiving treatment.";
       drawMissionPanel(
         "MISSION COMPLETE",
         message,
@@ -2026,7 +2121,7 @@
     function drawGameComplete() {
       drawMissionPanel(
         "TOUR COMPLETE",
-        "Ice scouted, expeditioners delivered, cargo moved, and a missing expeditioner rescued.",
+        "Ice scouted, people delivered, cargo moved, and both rescue flights completed.",
         "Excellent flying.",
         "PRESS SPACE FOR TITLE"
       );
@@ -2104,10 +2199,10 @@
       const code = event.code;
       if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
            "KeyA", "KeyD", "KeyW", "KeyS", "KeyE", "KeyH", "Space",
-           "Digit1", "Digit2", "Digit3", "Digit4"].includes(code)) {
+           "Digit1", "Digit2", "Digit3", "Digit4", "Digit5"].includes(code)) {
         event.preventDefault();
       }
-      if (/^Digit[1-4]$/.test(code) && pressed && !event.repeat) {
+      if (/^Digit[1-5]$/.test(code) && pressed && !event.repeat) {
         startLevel(parseInt(code.slice(5), 10) - 1, false);
       } else if (code === "ArrowLeft" || code === "KeyA") input.left = pressed;
       else if (code === "ArrowRight" || code === "KeyD") input.right = pressed;
@@ -2449,6 +2544,32 @@
       result.rescueLevelSkip =
         levelIndex === 3 && level.mission === "rescue" && gameState === "briefing";
 
+      startLevel(4, true);
+      simulateFrames(20);
+      result.medicalStartsOnShip = helicopter.landed &&
+        helicopter.landedAt === SHIP_DECK.name && !patientAboard;
+      result.medicalWindActive = Math.abs(medicalWindAcceleration()) > 0.1;
+      result.medicalSwellActive = Math.abs(shipSwellOffset()) > 0.05 &&
+        Math.abs(shipDeckVelocity()) > 0.01;
+      settleLanding(shipDeckSurface());
+      result.medicalShipRequiresPatient = gameState === "playing" && !patientAboard;
+      settleLanding(STATION_PAD);
+      result.medicalPatientBoards = patientAboard &&
+        activeObjective().x === (SHIP_DECK.x1 + SHIP_DECK.x2) / 2;
+      settleLanding(shipDeckSurface());
+      result.medicalComplete = gameState === "levelComplete";
+      onKey(
+        { code: "Digit5", repeat: false, preventDefault: function() {} },
+        true
+      );
+      result.medicalLevelSkip =
+        levelIndex === 4 && level.mission === "medical" && gameState === "briefing";
+
+      startLevel(0, true);
+      simulateFrames(20);
+      result.nonMedicalDeckStatic = shipSwellOffset() === 0 &&
+        shipDeckY() === SHIP_DECK_Y && shipDeckVelocity() === 0;
+
       result.pass = result.collectiveRaised === 35 &&
         result.collectivePersists &&
         result.landedCyclicPivots &&
@@ -2507,7 +2628,15 @@
         result.rescueLocated &&
         result.rescuePickup &&
         result.rescueComplete &&
-        result.rescueLevelSkip;
+        result.rescueLevelSkip &&
+        result.medicalStartsOnShip &&
+        result.medicalWindActive &&
+        result.medicalSwellActive &&
+        result.medicalShipRequiresPatient &&
+        result.medicalPatientBoards &&
+        result.medicalComplete &&
+        result.medicalLevelSkip &&
+        result.nonMedicalDeckStatic;
 
       resetGame(false);
       const report = document.createElement("div");
@@ -2521,7 +2650,7 @@
     resetGame(false);
     if (location.hash === "#test") runSelfTests();
     else {
-      const playHash = /^#play([1-4])$/.exec(location.hash);
+      const playHash = /^#play([1-5])$/.exec(location.hash);
       if (playHash) startLevel(parseInt(playHash[1], 10) - 1, true);
       requestAnimationFrame(frame);
     }
