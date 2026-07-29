@@ -100,11 +100,11 @@
     const HELI_RADIUS = 4.8;
     const PIXELS_PER_METRE = 4;
     const SHIP_DECK_Y = 13.488146;
-    const STATION_PAD_Y = 12;
+    const STATION_PAD_Y = 4.2;
     const WORLD_MIN_X = -300;
-    const WORLD_MAX_X = 2300;
-    const RESCUE_TERRAIN_START_X = 2100;
-    const RESCUE_PERSON_X = 2920;
+    const WORLD_MAX_X = 1025;
+    const RESCUE_TERRAIN_START_X = 825;
+    const RESCUE_PERSON_X = 1645;
     const RESCUE_CLEARING_Y = 18;
     const RESCUE_CLEARING_RADIUS = 18;
     const RESCUE_PICKUP_RADIUS = 13;
@@ -148,11 +148,14 @@
       x2: SHIP_CARGO_PAD.x1 - 3,
       y: 40,
     };
-    const STATION_PAD = { x1: 1768, x2: 1864, y: STATION_PAD_Y, name: "AURORA STATION" };
+    // Aurora Station is now a short flight east of Nuyina; the original layout
+    // has shifted west by 1,275 m with its shoreline and rescue terrain.
+    // Narrower than Nuyina's 28.5 m helipad, making station landings more precise.
+    const STATION_PAD = { x1: 529, x2: 553, y: STATION_PAD_Y, name: "AURORA STATION" };
     const BUILDINGS = [
-      { x1: 1900, x2: 1955, y1: 5, y2: 28 },
-      { x1: 1970, x2: 2028, y1: 5, y2: 22 },
-      { x1: 2050, x2: 2072, y1: 5, y2: 35 },
+      { x1: 625, x2: 680, y1: 5, y2: 28 },
+      { x1: 695, x2: 753, y1: 5, y2: 22 },
+      { x1: 775, x2: 797, y1: 5, y2: 35 },
     ];
     const RESCUE_CLEARING = {
       x1: RESCUE_PERSON_X - RESCUE_CLEARING_RADIUS,
@@ -175,7 +178,7 @@
         name: "Expeditioner Transfer",
         mission: "passengers",
         station: true,
-        worldMaxX: 2300,
+        worldMaxX: WORLD_MAX_X,
         brief: "Six expeditioners are aboard. Fly them safely from RSV Nuyina to Aurora Station.",
       },
       {
@@ -183,7 +186,7 @@
         name: "Cage Pallet Lift",
         mission: "sling",
         station: true,
-        worldMaxX: 2300,
+        worldMaxX: WORLD_MAX_X,
         brief: "Sling three cage pallets to the nearby shore cargo zone, then return and land aboard Nuyina.",
       },
       {
@@ -191,7 +194,7 @@
         name: "Night Search and Rescue",
         mission: "rescue",
         station: true,
-        worldMaxX: 3400,
+        worldMaxX: 2125,
         brief: "A missing expeditioner is somewhere east of Aurora Station. Search the dark terrain with the mouse-aimed spotlight, land beside them, then return to station.",
       },
     ];
@@ -407,7 +410,8 @@
 
     function iceHeightAt(x) {
       if (!level.station) return -Infinity;
-      if (x < 1570) return -Infinity;
+      if (x >= STATION_PAD.x1 && x <= STATION_PAD.x2) return STATION_PAD_Y;
+      if (x < 295) return -Infinity;
       const stationIce = 4.2 + Math.sin(x * 0.021) * 0.7 + Math.sin(x * 0.053) * 0.35;
       return level.mission === "rescue" && x >= RESCUE_TERRAIN_START_X ?
         rescueTerrainHeightAt(x) : stationIce;
@@ -761,17 +765,21 @@
       }
     }
 
+    function isScoutHoverValid() {
+      const heightAbovePeak = helicopter.y - SCOUT_PEAK_Y;
+      return level.mission === "scout" && !icebergScouted && !helicopter.landed &&
+        Math.abs(helicopter.x - SCOUT_X) <= SCOUT_RADIUS &&
+        heightAbovePeak >= 15 && heightAbovePeak <= 45 &&
+        Math.hypot(helicopter.vx, helicopter.vy) <= 3;
+    }
+
     function updateMission(dt) {
       if (missionNoticeTimer > 0) {
         missionNoticeTimer -= dt;
         if (missionNoticeTimer <= 0) missionNotice = "";
       }
       if (level.mission === "scout" && !icebergScouted && !helicopter.landed) {
-        const heightAbovePeak = helicopter.y - SCOUT_PEAK_Y;
-        const inEnvelope = Math.abs(helicopter.x - SCOUT_X) <= SCOUT_RADIUS &&
-          heightAbovePeak >= 15 && heightAbovePeak <= 45 &&
-          Math.hypot(helicopter.vx, helicopter.vy) <= 3;
-        scoutTimer = inEnvelope ? scoutTimer + dt : 0;
+        scoutTimer = isScoutHoverValid() ? scoutTimer + dt : 0;
         if (scoutTimer >= SCOUT_TIME) {
           scoutTimer = SCOUT_TIME;
           icebergScouted = true;
@@ -1050,11 +1058,11 @@
 
     function drawIce() {
       if (!level.station) return;
-      const startX = worldToScreenX(1570);
+      const startX = worldToScreenX(295);
       if (startX > viewWidth + 100) return;
       ctx.beginPath();
       ctx.moveTo(startX, viewHeight);
-      for (let x = 1570; x <= level.worldMaxX + 200; x += 8) {
+      for (let x = 295; x <= level.worldMaxX + 200; x += 8) {
         ctx.lineTo(worldToScreenX(x), worldToScreenY(iceHeightAt(x)));
       }
       ctx.lineTo(worldToScreenX(level.worldMaxX + 200), viewHeight);
@@ -1069,10 +1077,10 @@
       ctx.strokeStyle = "#f7ffff";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      for (let x = 1570; x <= level.worldMaxX + 200; x += 8) {
+      for (let x = 295; x <= level.worldMaxX + 200; x += 8) {
         const sx = worldToScreenX(x);
         const sy = worldToScreenY(iceHeightAt(x));
-        if (x === 1570) ctx.moveTo(sx, sy);
+        if (x === 295) ctx.moveTo(sx, sy);
         else ctx.lineTo(sx, sy);
       }
       ctx.stroke();
@@ -1123,6 +1131,22 @@
         ctx.lineWidth = 2;
         ctx.fillRect(left, top, right - left, bottom - top);
         ctx.strokeRect(left, top, right - left, bottom - top);
+        if (isScoutHoverValid()) {
+          const barWidth = Math.min(150, right - left - 16);
+          const barX = left + (right - left - barWidth) / 2;
+          const barY = top - 17;
+          const progress = clamp(scoutTimer / SCOUT_TIME, 0, 1);
+          ctx.setLineDash([]);
+          ctx.fillStyle = "rgba(5,20,29,0.8)";
+          ctx.fillRect(barX - 2, barY - 2, barWidth + 4, 12);
+          ctx.fillStyle = "rgba(255,255,255,0.18)";
+          ctx.fillRect(barX, barY, barWidth, 8);
+          ctx.fillStyle = "#65e4b0";
+          ctx.fillRect(barX, barY, barWidth * progress, 8);
+          ctx.strokeStyle = "rgba(225,255,244,0.85)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(barX, barY, barWidth, 8);
+        }
         ctx.restore();
       }
     }
@@ -1190,7 +1214,7 @@
       ctx.fillStyle = "rgba(7, 25, 40, 0.7)";
       ctx.font = "bold 15px Trebuchet MS";
       ctx.textAlign = "center";
-      ctx.fillText("AURORA STATION", worldToScreenX(1950), worldToScreenY(42));
+      ctx.fillText("AURORA STATION", worldToScreenX(675), worldToScreenY(42));
 
       if (level.mission === "sling") {
         const ground = cargoGroundY();
@@ -1211,7 +1235,7 @@
 
       if (level.mission === "passengers" && passengersAboard === 0) {
         for (let i = 0; i < 6; i++) {
-          drawExpeditioner(1882 + i * 4.5, STATION_PAD_Y + 0.2, i % 2);
+          drawExpeditioner(STATION_PAD.x2 + 18 + i * 4.5, STATION_PAD_Y + 0.2, i % 2);
         }
       }
     }
@@ -1648,12 +1672,12 @@
       if (level.mission !== "rescue" || rescueAboard) return;
       const x = worldToScreenX(RESCUE_PERSON_X);
       const y = worldToScreenY(RESCUE_CLEARING_Y);
-      ctx.save();
-      ctx.fillStyle = "rgba(255, 244, 158, 0.3)";
-      ctx.beginPath();
-      ctx.arc(x, y - 10, 15, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+      //ctx.save();
+      //ctx.fillStyle = "rgba(255, 244, 158, 0.3)";
+      //ctx.beginPath();
+      //ctx.arc(x, y - 10, 15, 0, Math.PI * 2);
+      //ctx.fill();
+      //ctx.restore();
       drawExpeditioner(RESCUE_PERSON_X, RESCUE_CLEARING_Y, 1);
     }
 
@@ -1838,7 +1862,8 @@
       }
 
       const objectiveWidth = Math.min(520, viewWidth - 24);
-      const objectiveHeight = level.mission === "sling" ? 84 : level.mission === "rescue" ? 68 : 48;
+      const objectiveHeight = level.mission === "sling" ? 84 :
+        level.mission === "rescue" || level.mission === "scout" ? 68 : 48;
       drawRoundedPanel(12, 104, objectiveWidth, objectiveHeight, 8,
         "rgba(5,20,29,0.78)");
       ctx.textAlign = "left";
@@ -1848,6 +1873,23 @@
       ctx.fillStyle = "#fff";
       ctx.font = "bold 14px Trebuchet MS";
       ctx.fillText(objectiveText(), 25, 146);
+
+      if (isScoutHoverValid()) {
+        const progress = clamp(scoutTimer / SCOUT_TIME, 0, 1);
+        const barX = 25;
+        const barY = 157;
+        const barWidth = Math.min(230, objectiveWidth - 170);
+        ctx.fillStyle = "rgba(255,255,255,0.16)";
+        ctx.fillRect(barX, barY, barWidth, 10);
+        ctx.fillStyle = "#65e4b0";
+        ctx.fillRect(barX, barY, barWidth * progress, 10);
+        ctx.strokeStyle = "rgba(225,255,244,0.75)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(barX, barY, barWidth, 10);
+        ctx.fillStyle = "#bff7dc";
+        ctx.font = "bold 11px Trebuchet MS";
+        ctx.fillText("HOVER STABLE " + (progress * 100).toFixed(0) + "%", barX + barWidth + 10, 166);
+      }
 
       if (level.mission === "rescue" && !rescueLocated && !rescueAboard) {
         ctx.fillStyle = "#b8dce8";
@@ -2280,7 +2322,9 @@
 
       startLevel(0, true);
       setAirborne(SCOUT_X, SCOUT_PEAK_Y + 25, GRAVITY / MAX_LIFT_ACCEL);
-      simulateFrames(Math.ceil(SCOUT_TIME / FIXED_DT) + 2);
+      simulateFrames(30);
+      result.scoutHoverProgress = isScoutHoverValid() && scoutTimer > 0;
+      simulateFrames(Math.ceil(SCOUT_TIME / FIXED_DT) - 28);
       result.icebergScouted = icebergScouted;
       result.scoutRetargeted = activeObjective().x ===
         (SHIP_DECK.x1 + SHIP_DECK.x2) / 2;
@@ -2294,6 +2338,11 @@
         gameState === "levelComplete" && passengersAboard === 0;
 
       startLevel(2, true);
+      result.cargoZoneGrounded = Number.isFinite(cargoGroundY()) &&
+        cargoGroundY() > 0;
+      result.stationPadFlush = Math.abs(
+        iceHeightAt((STATION_PAD.x1 + STATION_PAD.x2) / 2) - STATION_PAD.y
+      ) < 0.001;
       setAirborne(
         PALLET_PICKUP_X + PALLET_WIDTH / 2,
         pallet.y + 1.3 + CABLE_MAX_LENGTH / 2,
@@ -2428,11 +2477,14 @@
         result.safeLanding &&
         result.hardLandingCrash &&
         result.waterCrash &&
+        result.scoutHoverProgress &&
         result.icebergScouted &&
         result.scoutRetargeted &&
         result.scoutComplete &&
         result.passengersLoaded &&
         result.passengerComplete &&
+        result.cargoZoneGrounded &&
+        result.stationPadFlush &&
         result.cableDeployed &&
         result.cableRetracts &&
         result.cableRedeploys &&
