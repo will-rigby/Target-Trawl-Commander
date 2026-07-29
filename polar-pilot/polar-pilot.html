@@ -42,6 +42,8 @@
 
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
+    const nuyinaImage = new Image();
+    nuyinaImage.src = "nuyina%20side%20profile.svg";
 
     /* ================= flight tuning =================
        World coordinates are metres, with altitude increasing upward.
@@ -89,14 +91,15 @@
     const LOAD_MASS_RATIO = 0.3;
     const PALLET_WIDTH = 6;
     const PALLET_HEIGHT = 4;
-    const PALLET_PICKUP_X = 76;
+    // Centre of the SVG Cargopad layer after its world-space offset is applied.
+    const PALLET_PICKUP_X = 114.491375;
     // Level 3's shore cargo zone is deliberately close to Nuyina: its centre
-    // sits 296 m from the ship helipad centre for a compact sling route.
+    // sits about 316 m from the SVG cargo pad for a compact sling route.
     const CARGO_ZONE = { x1: 390, x2: 470 };
     const SKID_DROP = 2.25;
     const HELI_RADIUS = 4.8;
     const PIXELS_PER_METRE = 4;
-    const SHIP_DECK_Y = 14;
+    const SHIP_DECK_Y = 13.488146;
     const STATION_PAD_Y = 12;
     const WORLD_MIN_X = -300;
     const WORLD_MAX_X = 2300;
@@ -113,10 +116,38 @@
     const ISA_AIR_GAS_CONSTANT = 287.05;
     const ISA_TROPOPAUSE_ALTITUDE = 11000;
 
-    const SHIP_DECK = { x1: 92, x2: 176, y: SHIP_DECK_Y, name: "RSV NUYINA" };
-    // The whole exposed stern deck can support a gentle skid contact; the smaller
-    // SHIP_DECK area remains the visual landing-pad target and mission objective.
-    const SHIP_DECK_CONTACT = { x1: 58, x2: 196, y: SHIP_DECK_Y, name: SHIP_DECK.name };
+    // SVG coordinate metadata: 1 SVG pixel equals 1 metre and y=0 is the waterline.
+    const NUYINA_SVG_WIDTH = 160;
+    const NUYINA_SVG_HEIGHT = 100;
+    const NUYINA_HELIPAD_SVG = { x1: 131.00272, x2: 159.525221, y: 13.488146 };
+    const NUYINA_CARGO_PAD_SVG = { x1: 120.77345, x2: 130.7372438, y: 13.519649 };
+    const NUYINA_WORLD_X = 134 -
+      (NUYINA_HELIPAD_SVG.x1 + NUYINA_HELIPAD_SVG.x2) / 2;
+    const SHIP_DECK = {
+      x1: NUYINA_WORLD_X + NUYINA_HELIPAD_SVG.x1,
+      x2: NUYINA_WORLD_X + NUYINA_HELIPAD_SVG.x2,
+      y: SHIP_DECK_Y,
+      name: "RSV NUYINA",
+    };
+    const SHIP_CARGO_PAD = {
+      x1: NUYINA_WORLD_X + NUYINA_CARGO_PAD_SVG.x1,
+      x2: NUYINA_WORLD_X + NUYINA_CARGO_PAD_SVG.x2,
+      y: NUYINA_CARGO_PAD_SVG.y,
+      name: "NUYINA CARGO PAD",
+    };
+    // Cargo pad through helipad is the exposed deck; the forward superstructure
+    // remains a simplified collision envelope matching the SVG profile.
+    const SHIP_DECK_CONTACT = {
+      x1: SHIP_CARGO_PAD.x1 - 6,
+      x2: SHIP_DECK.x2,
+      y: SHIP_DECK_Y,
+      name: SHIP_DECK.name,
+    };
+    const SHIP_SUPERSTRUCTURE = {
+      x1: NUYINA_WORLD_X + 18,
+      x2: SHIP_CARGO_PAD.x1 - 3,
+      y: 40,
+    };
     const STATION_PAD = { x1: 1768, x2: 1864, y: STATION_PAD_Y, name: "AURORA STATION" };
     const BUILDINGS = [
       { x1: 1900, x2: 1955, y1: 5, y2: 28 },
@@ -325,7 +356,7 @@
     function spawnPallet() {
       pallet = {
         x: PALLET_PICKUP_X,
-        y: SHIP_DECK_Y + PALLET_HEIGHT,
+        y: SHIP_CARGO_PAD.y + PALLET_HEIGHT,
         vx: 0,
         vy: 0,
         status: "waiting", // waiting | attached | free
@@ -419,11 +450,12 @@
     }
 
     function solidHeightAt(x) {
-      if (x >= -130 && x <= 58) {
-        if (x >= -55 && x <= 42) return 39;
-        return 18 - Math.abs(x + 35) * 0.025;
+      if (x >= SHIP_SUPERSTRUCTURE.x1 && x <= SHIP_SUPERSTRUCTURE.x2) {
+        return SHIP_SUPERSTRUCTURE.y;
       }
-      if (x > 58 && x <= 196) return SHIP_DECK_Y;
+      if (x >= SHIP_DECK_CONTACT.x1 && x <= SHIP_DECK_CONTACT.x2) {
+        return SHIP_DECK_Y;
+      }
       return Math.max(iceHeightAt(x), icebergHeightAt(x));
     }
 
@@ -1096,222 +1128,14 @@
     }
 
     function drawNuyina() {
-      const x = worldToScreenX(-130);
-      const y = worldToScreenY(0);
-      const s = PIXELS_PER_METRE;
-      ctx.save();
-      ctx.translate(x, y);
-
-      // "Nuyina" is mirrored so the existing flight deck remains at the stern.
-      const hullGradient = ctx.createLinearGradient(0, -18 * s, 0, 4 * s);
-      hullGradient.addColorStop(0, '#f04b39');
-      hullGradient.addColorStop(0.62, '#cf2530');
-      hullGradient.addColorStop(1, '#8f1825');
-
-      ctx.fillStyle = '#111b22';
-      ctx.beginPath();
-      ctx.moveTo(0, -14 * s);
-      ctx.lineTo(13 * s, -18 * s);
-      ctx.lineTo(308 * s, -12 * s);
-      ctx.lineTo(326 * s, -10 * s);
-      ctx.lineTo(326 * s, -3 * s);
-      ctx.quadraticCurveTo(285 * s, 4 * s, 194 * s, 5 * s);
-      ctx.lineTo(45 * s, 5 * s);
-      ctx.quadraticCurveTo(8 * s, 3 * s, 0, -14 * s);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.fillStyle = hullGradient;
-      ctx.beginPath();
-      ctx.moveTo(0, -14 * s);
-      ctx.lineTo(13 * s, -18 * s);
-      ctx.lineTo(72 * s, -18 * s);
-      ctx.lineTo(82 * s, -15 * s);
-      ctx.lineTo(326 * s, -12 * s);
-      ctx.lineTo(326 * s, -3 * s);
-      ctx.quadraticCurveTo(265 * s, 0, 48 * s, 1.5 * s);
-      ctx.quadraticCurveTo(10 * s, 0, 0, -14 * s);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.fillStyle = '#f4f5ed';
-      ctx.beginPath();
-      ctx.moveTo(20 * s, -21 * s);
-      ctx.lineTo(216 * s, -20 * s);
-      ctx.lineTo(223 * s, -14 * s);
-      ctx.lineTo(77 * s, -14 * s);
-      ctx.lineTo(68 * s, -17.5 * s);
-      ctx.lineTo(20 * s, -17.5 * s);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = '#25343a';
-      ctx.fillRect(17 * s, -18.2 * s, 58 * s, 0.8 * s);
-      ctx.fillStyle = '#17262d';
-      ctx.roundRect(30 * s, -15 * s, 13 * s, 5 * s, 2 * s);
-      ctx.fill();
-      ctx.roundRect(157 * s, -14.5 * s, 21 * s, 5 * s, 1.5 * s);
-      ctx.fill();
-      ctx.roundRect(187 * s, -14.5 * s, 17 * s, 5 * s, 1.5 * s);
-      ctx.fill();
-      for (let i = 0; i < 14; i++) {
-        ctx.beginPath();
-        ctx.arc((55 + i * 15) * s, -6.7 * s, 0.7 * s, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.fillStyle = '#fff8e8';
-      ctx.font = 'bold 11px Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText('NUYINA', 24 * s, -10.3 * s);
-      ctx.font = 'bold 7px Arial';
-      ctx.fillText('HOBART', 24 * s, -8.2 * s);
-      ctx.strokeStyle = '#d7dfda';
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.moveTo(17 * s, -21 * s);
-      ctx.lineTo(68 * s, -21 * s);
-      ctx.moveTo(20 * s, -21 * s);
-      ctx.lineTo(20 * s, -24 * s);
-      ctx.moveTo(28 * s, -21 * s);
-      ctx.lineTo(28 * s, -23 * s);
-      ctx.moveTo(62 * s, -21 * s);
-      ctx.lineTo(62 * s, -23 * s);
-      ctx.stroke();
-      ctx.fillStyle = '#d8dfda';
-      ctx.fillRect(47 * s, -24 * s, 13 * s, 3 * s);
-      ctx.fillStyle = '#eef0e8';
-      ctx.beginPath();
-      ctx.moveTo(67 * s, -20 * s);
-      ctx.lineTo(214 * s, -20 * s);
-      ctx.lineTo(214 * s, -27 * s);
-      ctx.lineTo(195 * s, -30 * s);
-      ctx.lineTo(132 * s, -30 * s);
-      ctx.lineTo(126 * s, -39 * s);
-      ctx.lineTo(76 * s, -39 * s);
-      ctx.lineTo(67 * s, -31 * s);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = '#d9ddd5';
-      ctx.fillRect(128 * s, -36 * s, 57 * s, 6 * s);
-      ctx.fillRect(181 * s, -30 * s, 33 * s, 10 * s);
-
-      ctx.fillStyle = '#152b34';
-      ctx.beginPath();
-      ctx.moveTo(72 * s, -37 * s);
-      ctx.lineTo(78 * s, -42 * s);
-      ctx.lineTo(123 * s, -42 * s);
-      ctx.lineTo(127 * s, -37 * s);
-      ctx.closePath();
-      ctx.fill();
-      ctx.strokeStyle = '#aebbb8';
-      ctx.lineWidth = 1;
-      for (let i = 0; i < 6; i++) {
-        ctx.beginPath();
-        ctx.moveTo((79 + i * 7.5) * s, -42 * s);
-        ctx.lineTo((77 + i * 8.4) * s, -37 * s);
-        ctx.stroke();
-      }
-      ctx.fillStyle = '#1c2f36';
-      for (let i = 0; i < 5; i++) {
-        ctx.fillRect((76 + i * 10) * s, -33 * s, 5 * s, 3 * s);
-      }
-      for (let i = 0; i < 6; i++) {
-        ctx.fillRect((78 + i * 11) * s, -27 * s, 4 * s, 4 * s);
-      }
-
-      ctx.fillStyle = '#f58020';
-      ctx.roundRect(113 * s, -27.5 * s, 31 * s, 7 * s, 3.5 * s);
-      ctx.fill();
-      ctx.roundRect(174 * s, -27.5 * s, 27 * s, 7 * s, 3.5 * s);
-      ctx.fill();
-      ctx.strokeStyle = '#b94d1b';
-      ctx.lineWidth = 1.2;
-      ctx.strokeRect(117 * s, -26.2 * s, 23 * s, 4.5 * s);
-      ctx.strokeRect(178 * s, -26.2 * s, 19 * s, 4.5 * s);
-      ctx.fillStyle = '#eef0e8';
-      ctx.fillRect(142 * s, -39 * s, 48 * s, 6 * s);
-      ctx.strokeStyle = '#1b2428';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(145 * s, -39 * s);
-      ctx.lineTo(151 * s, -55 * s);
-      ctx.lineTo(182 * s, -55 * s);
-      ctx.lineTo(189 * s, -39 * s);
-      ctx.moveTo(151 * s, -51 * s);
-      ctx.lineTo(185 * s, -51 * s);
-      ctx.moveTo(149 * s, -47 * s);
-      ctx.lineTo(187 * s, -47 * s);
-      ctx.moveTo(147 * s, -43 * s);
-      ctx.lineTo(189 * s, -43 * s);
-      ctx.moveTo(151 * s, -55 * s);
-      ctx.lineTo(189 * s, -39 * s);
-      ctx.moveTo(182 * s, -55 * s);
-      ctx.lineTo(145 * s, -39 * s);
-      ctx.stroke();
-      ctx.fillStyle = '#434c4c';
-      ctx.fillRect(155 * s, -59 * s, 6 * s, 7 * s);
-      ctx.fillRect(173 * s, -59 * s, 6 * s, 7 * s);
-      ctx.strokeStyle = '#d6ddd8';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(105 * s, -42 * s);
-      ctx.lineTo(105 * s, -65 * s);
-      ctx.moveTo(94 * s, -48 * s);
-      ctx.lineTo(116 * s, -48 * s);
-      ctx.moveTo(97 * s, -55 * s);
-      ctx.lineTo(114 * s, -55 * s);
-      ctx.moveTo(105 * s, -61 * s);
-      ctx.lineTo(115 * s, -58 * s);
-      ctx.stroke();
-      ctx.fillStyle = '#e8ebe3';
-      ctx.fillRect(96 * s, -52 * s, 18 * s, 2 * s);
-      ctx.fillRect(99 * s, -58 * s, 14 * s, 2 * s);
-      ctx.beginPath();
-      ctx.arc(105 * s, -65 * s, 4 * s, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(122 * s, -47 * s, 3.2 * s, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#dfe4de';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(207 * s, -25 * s);
-      ctx.lineTo(216 * s, -38 * s);
-      ctx.lineTo(247 * s, -34 * s);
-      ctx.lineTo(257 * s, -29 * s);
-      ctx.stroke();
-      ctx.fillStyle = '#cbd2cc';
-      ctx.beginPath();
-      ctx.arc(207 * s, -25 * s, 3.2 * s, 0, Math.PI * 2);
-      ctx.fill();
-      const deckX = (SHIP_DECK.x1 + 130) * s;
-      const deckW = (SHIP_DECK.x2 - SHIP_DECK.x1) * s;
-      ctx.fillStyle = '#315258';
-      ctx.fillRect(deckX, -SHIP_DECK_Y * s, deckW, 2 * s);
-      ctx.strokeStyle = '#7bf5bc';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(deckX + 2, -SHIP_DECK_Y * s - 1, deckW - 4, 5);
-      ctx.fillStyle = '#7bf5bc';
-      for (let light = 5; light < deckW - 4; light += 17) {
-        ctx.beginPath();
-        ctx.arc(deckX + light, -SHIP_DECK_Y * s + 1, 1.5, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      ctx.strokeStyle = '#e4ebe5';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(deckX, -16 * s);
-      ctx.lineTo(deckX + deckW, -16 * s);
-      for (let rail = 0; rail <= deckW; rail += 25) {
-        ctx.moveTo(deckX + rail, -16 * s);
-        ctx.lineTo(deckX + rail, -14 * s);
-      }
-      ctx.stroke();
-      ctx.fillStyle = '#f4d84a';
-      ctx.font = 'bold 18px Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText('H', deckX + deckW / 2, -SHIP_DECK_Y * s + 18);
-      ctx.restore();
+      if (!nuyinaImage.complete || !nuyinaImage.naturalWidth) return;
+      const width = NUYINA_SVG_WIDTH * PIXELS_PER_METRE;
+      const height = NUYINA_SVG_HEIGHT * PIXELS_PER_METRE;
+      ctx.drawImage(
+        nuyinaImage,
+        worldToScreenX(NUYINA_WORLD_X), worldToScreenY(0) - height,
+        width, height
+      );
     }
 
     function drawStation() {
@@ -1708,8 +1532,8 @@
       ctx.textAlign = "left";
       ctx.font = "bold 11px Trebuchet MS";
       ctx.fillStyle = "#e5f6f7";
-      const horizontalDirection = helicopter.vx >= 0 ? ">" : "<";
-      const verticalDirection = helicopter.vy >= 0 ? "+" : "-";
+      const horizontalDirection = helicopter.vx >= 0 ? "→" : "←";
+      const verticalDirection = helicopter.vy >= 0 ? "↑" : "↓";
       ctx.fillText(
         "H " + horizontalDirection + " " + Math.abs(helicopter.vx).toFixed(1) + " m/s",
         x + 10, y + 19
@@ -1920,7 +1744,7 @@
       }
       return pallet ?
         { x: pallet.x, y: pallet.y } :
-        { x: PALLET_PICKUP_X, y: SHIP_DECK_Y + PALLET_HEIGHT };
+        { x: PALLET_PICKUP_X, y: SHIP_CARGO_PAD.y + PALLET_HEIGHT };
     }
 
     function drawObjectivePointer() {
@@ -2333,6 +2157,13 @@
       simulateFrames(120);
       result.landedCyclicReturnsLevel = Math.abs(helicopter.angle) < 0.02 &&
         Math.abs(helicopter.angularVelocity) < 0.02;
+      result.svgShipGeometry = NUYINA_SVG_WIDTH === 160 &&
+        Math.abs((SHIP_DECK.x1 + SHIP_DECK.x2) / 2 - 134) < 0.001 &&
+        Math.abs(SHIP_DECK.y - 13.488146) < 0.001 &&
+        PALLET_PICKUP_X >= SHIP_CARGO_PAD.x1 && PALLET_PICKUP_X <= SHIP_CARGO_PAD.x2;
+      result.slingRouteIsShort = Math.abs(
+        (CARGO_ZONE.x1 + CARGO_ZONE.x2) / 2 - PALLET_PICKUP_X
+      ) >= 280 && Math.abs((CARGO_ZONE.x1 + CARGO_ZONE.x2) / 2 - PALLET_PICKUP_X) <= 330;
 
       resetGame(true);
       helicopter.collective = 0.78;
@@ -2341,7 +2172,7 @@
       result.tiltedSkidTakeoff = !helicopter.landed && gameState === "playing" &&
         Math.abs(helicopter.angle) <= SKID_PIVOT_MAX_ANGLE + 0.08;
 
-      setAirborne(70, SHIP_DECK_Y + SKID_DROP + 0.01, 0.3);
+      setAirborne((SHIP_DECK.x1 + SHIP_DECK.x2) / 2, SHIP_DECK_Y + SKID_DROP + 0.01, 0.3);
       helicopter.angle = 20 * Math.PI / 180;
       helicopter.vy = -1;
       stepPhysics(FIXED_DT);
@@ -2573,6 +2404,8 @@
         result.collectivePersists &&
         result.landedCyclicPivots &&
         result.landedCyclicReturnsLevel &&
+        result.svgShipGeometry &&
+        result.slingRouteIsShort &&
         result.tiltedSkidTakeoff &&
         result.tiltedDeckLanding &&
         result.climbed > 3 &&
