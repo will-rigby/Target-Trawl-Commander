@@ -73,9 +73,10 @@
     const SAFE_LATERAL_SPEED = 4;
     const SAFE_LANDING_ANGLE = 12 * Math.PI / 180;
     const SAFE_ANGULAR_RATE = 28 * Math.PI / 180;
-    const SKID_HALF_SPAN = 2.7;
-    const SKID_PIVOT_MAX_ANGLE = 18 * Math.PI / 180;
-    const SKID_CONTACT_MAX_ANGLE = 25 * Math.PI / 180;
+    // The cabin begins to lose its deck clearance beyond this attitude, so
+    // skid rocking is intentionally gentler than the old visual-only limit.
+    const SKID_PIVOT_MAX_ANGLE = 10 * Math.PI / 180;
+    const SKID_CONTACT_MAX_ANGLE = 12 * Math.PI / 180;
     const SKID_PIVOT_MAX_LATERAL_SPEED = 2.5;
     const SKID_PIVOT_MAX_DESCENT_SPEED = 4;
     const SKID_PIVOT_MAX_ANGULAR_RATE = 75 * Math.PI / 180;
@@ -97,13 +98,14 @@
     // sits about 316 m from the SVG cargo pad for a compact sling route.
     const CARGO_ZONE = { x1: 390, x2: 470 };
     const SKID_DROP = 2.25;
-    const HELI_RADIUS = 4.8;
     const PIXELS_PER_METRE = 4;
     const SHIP_DECK_Y = 13.488146;
     const SHIP_SWELL_AMPLITUDE = 1.5;
     const SHIP_SWELL_PERIOD = 8;
     const MEDICAL_WIND_BASE_ACCEL = 1.15;
     const MEDICAL_WIND_GUST_ACCEL = 0.5;
+    const SUMMIT_WIND_BASE_ACCEL = 1.65;
+    const SUMMIT_WIND_GUST_ACCEL = 0.85;
     const STATION_PAD_Y = 4.2;
     const WORLD_MIN_X = -300;
     const WORLD_MAX_X = 1025;
@@ -115,6 +117,13 @@
     const SPOTLIGHT_RANGE = 250;
     const SPOTLIGHT_HALF_ANGLE = 13 * Math.PI / 180;
     const RESCUE_SPOTLIGHT_TIME = 2;
+    const SUMMIT_LEDGE = { x1: 774, x2: 802, y: 126, name: "ENGINEER LEDGE" };
+    const SUMMIT_PEAK = { x1: 871, x2: 883, y: 188, name: "RADIO SUMMIT" };
+    const SUMMIT_MOUNTAIN_POINTS = [
+      [520, 0], [575, 25], [640, 58], [710, 95], [754, 120],
+      [774, 126], [802, 126], [830, 145], [852, 171], [871, 188],
+      [883, 188], [900, 164], [935, 118], [990, 58], [1050, 0],
+    ];
     const ISA_SEA_LEVEL_TEMPERATURE = 288.15;
     const ISA_TEMPERATURE_LAPSE_RATE = 0.0065;
     const ISA_AIR_GAS_CONSTANT = 287.05;
@@ -142,18 +151,23 @@
       y: NUYINA_CARGO_PAD_SVG.y,
       name: "NUYINA CARGO PAD",
     };
-    // Cargo pad through helipad is the exposed deck; the forward superstructure
-    // remains a simplified collision envelope matching the SVG profile.
-    const SHIP_DECK_CONTACT = {
-      x1: SHIP_CARGO_PAD.x1 - 6,
+    // Collision is expressed in SVG coordinates so it stays aligned with the
+    // illustration if the ship is repositioned.  These are the visible major
+    // deck and superstructure steps, read from the hull artwork rather than a
+    // single rectangle.
+    const NUYINA_SOLID_PROFILE_SVG = [
+      [0, -8], [12, -15], [24, -20], [24.1, -29.7], [48, -29.7],
+      [48.1, -23], [55, -23], [55.1, -34.2], [75, -34.2],
+      [75.1, -35.2], [93, -35.2], [93.1, -22.3], [110, -22.3],
+      [110.1, -22.94], [159.740991, -22.94],
+    ];
+    // The broad aft working deck is visibly clear from the cargo pad through
+    // the stern.  Only the marked helipad is an objective landing zone.
+    const SHIP_EXPOSED_DECK = {
+      x1: NUYINA_WORLD_X + 110,
       x2: SHIP_DECK.x2,
       y: SHIP_DECK_Y,
       name: SHIP_DECK.name,
-    };
-    const SHIP_SUPERSTRUCTURE = {
-      x1: NUYINA_WORLD_X + 18,
-      x2: SHIP_CARGO_PAD.x1 - 3,
-      y: 40,
     };
     // Aurora Station is now a short flight east of Nuyina; the original layout
     // has shifted west by 1,275 m with its shoreline and rescue terrain.
@@ -212,6 +226,14 @@
         worldMaxX: WORLD_MAX_X,
         brief: "A patient is waiting at Aurora Station. Fly through the crosswind, land to board them, then return to Nuyina's moving deck for treatment.",
       },
+      {
+        number: 6,
+        name: "Summit Radio Relay",
+        mission: "summit",
+        station: false,
+        worldMaxX: 1250,
+        brief: "In strong mountain winds, land two engineers on the ledge, sling Nuyina's radio repeater onto the narrow summit, collect the team, and return to the ship.",
+      },
     ];
 
     const input = {
@@ -232,6 +254,7 @@
       collective: 0,
       landed: true,
       landedAt: SHIP_DECK.name,
+      landedSurface: null,
       facing: 1,
     };
 
@@ -245,6 +268,9 @@
     let rescueLocated = false;
     let rescueAboard = false;
     let patientAboard = false;
+    let engineersDropped = false;
+    let engineersAboard = true;
+    let antennaInstalled = false;
     // Unit vector in world space; it holds the spotlight bearing between mouse moves.
     let spotlightAimX = 1;
     let spotlightAimY = -0.15;
@@ -331,10 +357,11 @@
 
     function shipDeckSurface() {
       return {
-        x1: SHIP_DECK_CONTACT.x1,
-        x2: SHIP_DECK_CONTACT.x2,
+        x1: SHIP_DECK.x1,
+        x2: SHIP_DECK.x2,
         y: shipDeckY(),
         name: SHIP_DECK.name,
+        kind: "shipHelipad",
       };
     }
 
@@ -343,19 +370,22 @@
     }
 
     function surfaceVerticalVelocity(surface) {
-      return surface && surface.name === SHIP_DECK.name ? shipDeckVelocity() : 0;
+      return surface && (surface.kind === "shipHelipad" || surface.kind === "shipDeck" ||
+        surface.name === SHIP_DECK.name) ? shipDeckVelocity() : 0;
     }
 
     function medicalWindAcceleration() {
-      if (!level || level.mission !== "medical") return 0;
-      return MEDICAL_WIND_BASE_ACCEL +
-        MEDICAL_WIND_GUST_ACCEL * Math.sin(elapsed * 0.9) +
-        MEDICAL_WIND_GUST_ACCEL * 0.45 * Math.sin(elapsed * 2.1 + 0.7);
+      if (!level || (level.mission !== "medical" && level.mission !== "summit")) return 0;
+      const base = level.mission === "summit" ? SUMMIT_WIND_BASE_ACCEL : MEDICAL_WIND_BASE_ACCEL;
+      const gust = level.mission === "summit" ? SUMMIT_WIND_GUST_ACCEL : MEDICAL_WIND_GUST_ACCEL;
+      return base + gust * Math.sin(elapsed * 0.9) + gust * 0.45 * Math.sin(elapsed * 2.1 + 0.7);
     }
 
     function medicalWindSpeed() {
-      if (!level || level.mission !== "medical") return 0;
-      return 12 + 3.5 * Math.sin(elapsed * 0.9) + 1.6 * Math.sin(elapsed * 2.1 + 0.7);
+      if (!level || (level.mission !== "medical" && level.mission !== "summit")) return 0;
+      const base = level.mission === "summit" ? 18 : 12;
+      const gust = level.mission === "summit" ? 5.2 : 3.5;
+      return base + gust * Math.sin(elapsed * 0.9) + gust * 0.45 * Math.sin(elapsed * 2.1 + 0.7);
     }
 
     function resizeCanvas() {
@@ -408,6 +438,7 @@
       helicopter.collective = 0;
       helicopter.landed = true;
       helicopter.landedAt = SHIP_DECK.name;
+      helicopter.landedSurface = null;
       helicopter.facing = 1;
       if (level && level.mission === "rescue") {
         helicopter.x = (STATION_PAD.x1 + STATION_PAD.x2) / 2;
@@ -440,6 +471,9 @@
       rescueLocated = false;
       rescueAboard = false;
       patientAboard = false;
+      engineersDropped = false;
+      engineersAboard = true;
+      antennaInstalled = false;
       spotlightAimX = 1;
       spotlightAimY = -0.15;
       passengersAboard = level.mission === "passengers" ? 6 : 0;
@@ -450,7 +484,7 @@
       cableTargetLength = 0;
       missionNotice = "";
       missionNoticeTimer = 0;
-      if (level.mission === "sling") spawnPallet();
+      if (usesSlingLoad()) spawnPallet();
       washParticles.length = 0;
       clearInput();
       gameState = nextState || "briefing";
@@ -505,41 +539,135 @@
       return 0;
     }
 
-    function landingSurfaceAt(x) {
-      if (x >= SHIP_DECK_CONTACT.x1 && x <= SHIP_DECK_CONTACT.x2) return shipDeckSurface();
-      if (level.station && x >= STATION_PAD.x1 && x <= STATION_PAD.x2) return STATION_PAD;
-      if (level.mission === "rescue" && x >= RESCUE_CLEARING.x1 && x <= RESCUE_CLEARING.x2) {
-        return RESCUE_CLEARING;
+    function summitHeightAt(x) {
+      if (level.mission !== "summit" ||
+          x < SUMMIT_MOUNTAIN_POINTS[0][0] ||
+          x > SUMMIT_MOUNTAIN_POINTS[SUMMIT_MOUNTAIN_POINTS.length - 1][0]) return -Infinity;
+      for (let i = 1; i < SUMMIT_MOUNTAIN_POINTS.length; i++) {
+        if (x <= SUMMIT_MOUNTAIN_POINTS[i][0]) {
+          const a = SUMMIT_MOUNTAIN_POINTS[i - 1], b = SUMMIT_MOUNTAIN_POINTS[i];
+          return lerp(a[1], b[1], (x - a[0]) / (b[0] - a[0]));
+        }
       }
-      return null;
+      return 0;
+    }
+
+    function nuyinaWorldY(svgY) {
+      return NUYINA_ARTWORK_Y_OFFSET - svgY + shipSwellOffset();
+    }
+
+    function shipSolidHeightAt(x) {
+      const svgX = x - NUYINA_WORLD_X;
+      const points = NUYINA_SOLID_PROFILE_SVG;
+      if (svgX < points[0][0] || svgX > points[points.length - 1][0]) return -Infinity;
+      for (let i = 1; i < points.length; i++) {
+        if (svgX <= points[i][0]) {
+          const a = points[i - 1], b = points[i];
+          return nuyinaWorldY(lerp(a[1], b[1], (svgX - a[0]) / (b[0] - a[0])));
+        }
+      }
+      return nuyinaWorldY(points[points.length - 1][1]);
+    }
+
+    function terrainHeightAt(x) {
+      return Math.max(iceHeightAt(x), icebergHeightAt(x), summitHeightAt(x));
+    }
+
+    function shipLandingSurfaceAt(x) {
+      if (x < SHIP_EXPOSED_DECK.x1 || x > SHIP_EXPOSED_DECK.x2) return null;
+      return {
+        x1: SHIP_EXPOSED_DECK.x1, x2: SHIP_EXPOSED_DECK.x2, y: shipDeckY(),
+        name: SHIP_DECK.name,
+        kind: x >= SHIP_DECK.x1 && x <= SHIP_DECK.x2 ? "shipHelipad" : "shipDeck",
+      };
+    }
+
+    function landingSurfaceAt(x) {
+      const shipSurface = shipLandingSurfaceAt(x);
+      if (shipSurface) return shipSurface;
+      if (level.station && x >= STATION_PAD.x1 && x <= STATION_PAD.x2) {
+        return { ...STATION_PAD, kind: "stationPad" };
+      }
+      if (level.mission === "rescue" && x >= RESCUE_CLEARING.x1 && x <= RESCUE_CLEARING.x2) {
+        return { ...RESCUE_CLEARING, kind: "rescueClearing" };
+      }
+      if (level.station) {
+        for (let i = 0; i < BUILDINGS.length; i++) {
+          const building = BUILDINGS[i];
+          if (x >= building.x1 && x <= building.x2) {
+            return { x1: building.x1, x2: building.x2, y: building.y2, name: "STATION ROOF", kind: "roof", buildingIndex: i };
+          }
+        }
+      }
+      const terrain = terrainHeightAt(x);
+      return Number.isFinite(terrain) ? { y: terrain, name: "TERRAIN", kind: "terrain" } : null;
+    }
+
+    function surfaceHeightAt(surface, x) {
+      if (!surface) return -Infinity;
+      if (surface.kind === "shipHelipad" || surface.kind === "shipDeck" || surface === SHIP_DECK) {
+        return shipDeckY();
+      }
+      if (surface.kind === "terrain") return terrainHeightAt(x);
+      return surface.y;
     }
 
     function solidHeightAt(x) {
-      if (x >= SHIP_SUPERSTRUCTURE.x1 && x <= SHIP_SUPERSTRUCTURE.x2) {
-        return SHIP_SUPERSTRUCTURE.y + shipSwellOffset();
+      let solid = shipSolidHeightAt(x);
+      if (level.station) {
+        for (const building of BUILDINGS) {
+          if (x >= building.x1 && x <= building.x2) solid = Math.max(solid, building.y2);
+        }
       }
-      if (x >= SHIP_DECK_CONTACT.x1 && x <= SHIP_DECK_CONTACT.x2) {
-        return shipDeckY();
-      }
-      return Math.max(iceHeightAt(x), icebergHeightAt(x));
+      return Math.max(solid, terrainHeightAt(x));
+    }
+
+    function helicopterPose() {
+      return { x: helicopter.x, y: helicopter.y, angle: helicopter.angle, facing: helicopter.facing };
+    }
+
+    function helicopterPoint(localX, localY, pose) {
+      const cos = Math.cos(pose.angle);
+      const sin = Math.sin(pose.angle);
+      const mirroredX = localX * pose.facing;
+      return {
+        x: pose.x + mirroredX * cos - localY * sin,
+        y: pose.y - (mirroredX * sin + localY * cos),
+      };
+    }
+
+    function skidContacts(pose) {
+      // Use the lowest rail line as the support plane; the visual upturns at
+      // either end remain decorative and do not leave the aircraft hovering.
+      return [[-3.55, SKID_DROP], [4.3, SKID_DROP]].map(([x, y]) => helicopterPoint(x, y, pose));
     }
 
     function lowestSkidAltitude() {
-      const sin = Math.sin(helicopter.angle);
-      const cos = Math.cos(helicopter.angle);
-      const left = helicopter.y - (-2.7 * sin + SKID_DROP * cos);
-      const right = helicopter.y - (2.7 * sin + SKID_DROP * cos);
-      return Math.min(left, right);
+      return Math.min(...skidContacts(helicopterPose()).map(point => point.y));
     }
 
-    function helicopterHitsBuilding() {
-      if (!level.station) return false;
-      for (const building of BUILDINGS) {
-        const nearestX = clamp(helicopter.x, building.x1, building.x2);
-        const nearestY = clamp(helicopter.y, building.y1, building.y2);
-        const dx = helicopter.x - nearestX;
-        const dy = helicopter.y - nearestY;
-        if (dx * dx + dy * dy < HELI_RADIUS * HELI_RADIUS) return true;
+    function dangerousHelicopterHitsSolid(previousPose) {
+      const currentPose = helicopterPose();
+      const travel = Math.hypot(currentPose.x - previousPose.x, currentPose.y - previousPose.y) +
+        Math.abs(currentPose.angle - previousPose.angle) * 8;
+      const steps = Math.max(1, Math.ceil(travel / 0.25));
+      // Cockpit perimeter, main rotor span, and tail-rotor disc samples.
+      const probes = [
+        [-1.8, 0.9], [-1.8, -0.7], [-1.15, -1.65], [0.5, -1.85],
+        [2.3, -1.55], [4.35, -0.35], [3.55, 1.1], [1.0, 1.4],
+        [-7.7, -3.18], [-3.8, -3.18], [0.15, -3.18], [4.0, -3.18], [7.9, -3.18],
+        [-7.88, -1.83], [-7.88, -0.78], [-7.88, 0.27],
+      ];
+      for (let step = 0; step <= steps; step++) {
+        const t = step / steps;
+        const pose = {
+          x: lerp(previousPose.x, currentPose.x, t), y: lerp(previousPose.y, currentPose.y, t),
+          angle: lerp(previousPose.angle, currentPose.angle, t), facing: currentPose.facing,
+        };
+        for (const [x, y] of probes) {
+          const point = helicopterPoint(x, y, pose);
+          if (point.y <= solidHeightAt(point.x) + 0.02) return true;
+        }
       }
       return false;
     }
@@ -549,6 +677,7 @@
       crashReason = reason;
       gameState = "crashed";
       helicopter.landed = false;
+      helicopter.landedSurface = null;
       clearInput();
     }
 
@@ -564,7 +693,12 @@
     }
 
     function settleLanding(surface) {
-      helicopter.y = surface.y + SKID_DROP;
+      if (!surface.kind) {
+        if (surface === SHIP_DECK) surface = shipDeckSurface();
+        else if (surface === STATION_PAD) surface = { ...STATION_PAD, kind: "stationPad" };
+        else if (surface === RESCUE_CLEARING) surface = { ...RESCUE_CLEARING, kind: "rescueClearing" };
+      }
+      helicopter.y = surfaceHeightAt(surface, helicopter.x) + SKID_DROP;
       helicopter.vx = 0;
       helicopter.vy = surfaceVerticalVelocity(surface);
       helicopter.angle = 0;
@@ -572,26 +706,40 @@
       helicopter.angularVelocity = 0;
       helicopter.landed = true;
       helicopter.landedAt = surface.name;
-      if (level.mission === "scout" && icebergScouted && surface.name === SHIP_DECK.name) {
+      helicopter.landedSurface = surface;
+      if (level.mission === "scout" && icebergScouted && surface.kind === "shipHelipad") {
         completeLevel();
-      } else if (level.mission === "passengers" && surface === STATION_PAD) {
+      } else if (level.mission === "passengers" && surface.kind === "stationPad") {
         passengersAboard = 0;
         completeLevel();
-      } else if (level.mission === "sling" && deliveries === 3 && surface.name === SHIP_DECK.name) {
+      } else if (level.mission === "sling" && deliveries === 3 && surface.kind === "shipHelipad") {
         completeLevel();
       } else if (level.mission === "rescue") {
-        if (surface === RESCUE_CLEARING && rescueLocated && !rescueAboard &&
+        if (surface.kind === "rescueClearing" && rescueLocated && !rescueAboard &&
             Math.abs(helicopter.x - RESCUE_PERSON_X) <= RESCUE_PICKUP_RADIUS) {
           rescueAboard = true;
           setMissionNotice("EXPEDITIONER ABOARD - RETURN TO STATION");
-        } else if (surface === STATION_PAD && rescueAboard) {
+        } else if (surface.kind === "stationPad" && rescueAboard) {
           completeLevel();
         }
       } else if (level.mission === "medical") {
-        if (surface === STATION_PAD && !patientAboard) {
+        if (surface.kind === "stationPad" && !patientAboard) {
           patientAboard = true;
           setMissionNotice("PATIENT ABOARD - RETURN TO NUYINA");
-        } else if (surface.name === SHIP_DECK.name && patientAboard) {
+        } else if (surface.kind === "shipHelipad" && patientAboard) {
+          completeLevel();
+        }
+      } else if (level.mission === "summit") {
+        const onLedge = surface.kind === "terrain" &&
+          helicopter.x >= SUMMIT_LEDGE.x1 && helicopter.x <= SUMMIT_LEDGE.x2;
+        if (onLedge && !engineersDropped) {
+          engineersDropped = true;
+          engineersAboard = false;
+          setMissionNotice("ENGINEERS DEPLOYED - RETURN TO NUYINA FOR THE REPEATER");
+        } else if (onLedge && antennaInstalled && !engineersAboard) {
+          engineersAboard = true;
+          setMissionNotice("ENGINEERS ABOARD - RETURN TO NUYINA");
+        } else if (surface.kind === "shipHelipad" && engineersAboard && antennaInstalled) {
           completeLevel();
         }
       }
@@ -599,12 +747,14 @@
 
     function holdOnSkids(surface) {
       // Keep the lower skid on the surface while the aircraft gently rocks.
-      helicopter.y = surface.y + SKID_DROP * Math.cos(helicopter.angle) +
-        SKID_HALF_SPAN * Math.abs(Math.sin(helicopter.angle));
+      const surfaceHeight = surfaceHeightAt(surface, helicopter.x);
+      const lowestSkid = Math.min(...skidContacts(helicopterPose()).map(point => point.y));
+      helicopter.y += surfaceHeight - lowestSkid;
       helicopter.vx = 0;
       helicopter.vy = surfaceVerticalVelocity(surface);
       helicopter.landed = true;
       helicopter.landedAt = surface.name;
+      helicopter.landedSurface = surface;
     }
 
     function canRockOnSkids(surface) {
@@ -615,17 +765,22 @@
         Math.abs(helicopter.angularVelocity) <= SKID_PIVOT_MAX_ANGULAR_RATE;
     }
 
-    function checkContact() {
-      if (helicopterHitsBuilding()) {
-        crash("You struck the station buildings.");
+    function checkContact(previousPose) {
+      if (dangerousHelicopterHitsSolid(previousPose)) {
+        crash("Cockpit or rotor impact — keep the aircraft clear of terrain and structures.");
         return;
       }
 
-      const skidAltitude = lowestSkidAltitude();
-      const landingSurface = landingSurfaceAt(helicopter.x);
+      const contacts = skidContacts(helicopterPose()).map(point => {
+        const surface = landingSurfaceAt(point.x);
+        return { point, surface, height: surfaceHeightAt(surface, point.x) };
+      });
+      const touching = contacts.filter(contact => contact.surface && contact.point.y <= contact.height + 0.03);
+      const activeContact = touching.sort((a, b) => (b.height - b.point.y) - (a.height - a.point.y))[0];
+      const landingSurface = activeContact && activeContact.surface;
       const surfaceVelocity = surfaceVerticalVelocity(landingSurface);
       const relativeVerticalSpeed = helicopter.vy - surfaceVelocity;
-      if (landingSurface && skidAltitude <= landingSurface.y + 0.03 && relativeVerticalSpeed <= 0) {
+      if (landingSurface && relativeVerticalSpeed <= 0) {
         const safe = -relativeVerticalSpeed <= SAFE_DESCENT_SPEED &&
           Math.abs(helicopter.vx) <= SAFE_LATERAL_SPEED &&
           Math.abs(helicopter.angle) <= SAFE_LANDING_ANGLE &&
@@ -637,16 +792,18 @@
       }
 
       const solidHeight = solidHeightAt(helicopter.x);
-      if (skidAltitude <= solidHeight) {
+      // A skid that is just lifting away from a valid support is not a hull
+      // strike; only non-landable solid contact reaches this fallback.
+      if (!touching.length && lowestSkidAltitude() <= solidHeight) {
         crash(
           helicopter.x < 300 ? "You struck RSV Nuyina." :
           level.mission === "scout" ? "You struck the iceberg." :
-          "You struck the ice — use the marked station helipad."
+          "You struck the terrain."
         );
         return;
       }
 
-      if (skidAltitude <= 0) {
+      if (lowestSkidAltitude() <= 0) {
         crash("Water impact — keep enough collective to arrest the descent.");
         return;
       }
@@ -658,6 +815,10 @@
 
     function cargoGroundY() {
       return iceHeightAt((CARGO_ZONE.x1 + CARGO_ZONE.x2) / 2);
+    }
+
+    function usesSlingLoad() {
+      return level.mission === "sling" || level.mission === "summit";
     }
 
     function loadAttached() {
@@ -698,7 +859,7 @@
     function attachPallet() {
       if (!pallet) return;
       pallet.status = "attached";
-      setMissionNotice("CAGE ATTACHED");
+      setMissionNotice(level.mission === "summit" ? "RADIO REPEATER ATTACHED" : "CAGE ATTACHED");
     }
 
     function deliveryIsValid() {
@@ -712,8 +873,29 @@
         Math.abs(pallet.vy) <= 1;
     }
 
+    function antennaDeliveryIsValid() {
+      if (!pallet) return false;
+      const bottom = pallet.y - PALLET_HEIGHT;
+      return antennaInstalled === false &&
+        pallet.x >= SUMMIT_PEAK.x1 + PALLET_WIDTH / 2 &&
+        pallet.x <= SUMMIT_PEAK.x2 - PALLET_WIDTH / 2 &&
+        bottom <= SUMMIT_PEAK.y + 0.75 &&
+        Math.abs(pallet.vx) <= 1.5 &&
+        Math.abs(pallet.vy) <= 1;
+    }
+
     function releasePallet() {
       if (!loadAttached()) return;
+      if (level.mission === "summit") {
+        if (antennaDeliveryIsValid()) {
+          antennaInstalled = true;
+          pallet = null;
+          setMissionNotice("RADIO REPEATER INSTALLED - PICK UP THE ENGINEERS");
+        } else {
+          crash("Radio repeater placement failed - the summit target was missed.");
+        }
+        return;
+      }
       if (deliveryIsValid()) {
         const slot = deliveries;
         deliveredPallets.push({
@@ -733,7 +915,11 @@
     }
 
     function handleLoadKey() {
-      if (gameState !== "playing" || level.mission !== "sling") return;
+      if (gameState !== "playing" || !usesSlingLoad()) return;
+      if (level.mission === "summit" && !engineersDropped) {
+        setMissionNotice("DROP THE ENGINEERS ON THE LEDGE FIRST");
+        return;
+      }
       if (loadAttached()) {
         releasePallet();
       } else if (cableTargetLength > 0) {
@@ -754,7 +940,7 @@
     }
 
     function updateSling(dt) {
-      if (level.mission !== "sling") return;
+      if (!usesSlingLoad()) return;
       if (!loadAttached()) {
         if (cableLength < cableTargetLength) {
           cableLength = Math.min(cableTargetLength, cableLength + CABLE_RATE * dt);
@@ -870,6 +1056,8 @@
     function stepPhysics(dt) {
       if (gameState !== "playing") return;
 
+      const previousPose = helicopterPose();
+
       const massFactor = loadAttached() ? 1 + LOAD_MASS_RATIO : 1;
       const availableLiftAcceleration = availableLiftAccelerationAt(helicopter.y);
 
@@ -930,12 +1118,15 @@
       const horizontalLift = liftAcceleration * Math.sin(helicopter.angle);
 
       if (helicopter.landed) {
-        const landedSurface = helicopter.landedAt === STATION_PAD.name ? STATION_PAD :
-          helicopter.landedAt === RESCUE_CLEARING.name ? RESCUE_CLEARING : shipDeckSurface();
+        const landedSurface = helicopter.landedSurface ||
+          (helicopter.landedAt === STATION_PAD.name ? { ...STATION_PAD, kind: "stationPad" } :
+            helicopter.landedAt === RESCUE_CLEARING.name ? { ...RESCUE_CLEARING, kind: "rescueClearing" } :
+              shipDeckSurface());
         holdOnSkids(landedSurface);
         if (verticalLift > GRAVITY * 1.02) {
           helicopter.landed = false;
           helicopter.landedAt = "";
+          helicopter.landedSurface = null;
           helicopter.vy = surfaceVerticalVelocity(landedSurface) + 0.08;
         }
       } else {
@@ -952,7 +1143,7 @@
         }
         helicopter.x += helicopter.vx * dt;
         helicopter.y += helicopter.vy * dt;
-        checkContact();
+        checkContact(previousPose);
       }
 
       if (gameState === "playing") {
@@ -1222,6 +1413,103 @@
       }
     }
 
+    function drawSummitMountain() {
+      if (level.mission !== "summit") return;
+      ctx.beginPath();
+      ctx.moveTo(worldToScreenX(SUMMIT_MOUNTAIN_POINTS[0][0]), worldToScreenY(-12));
+      for (const point of SUMMIT_MOUNTAIN_POINTS) {
+        ctx.lineTo(worldToScreenX(point[0]), worldToScreenY(point[1]));
+      }
+      ctx.lineTo(worldToScreenX(SUMMIT_MOUNTAIN_POINTS[SUMMIT_MOUNTAIN_POINTS.length - 1][0]), worldToScreenY(-12));
+      ctx.closePath();
+      const mountainGradient = ctx.createLinearGradient(0, worldToScreenY(SUMMIT_PEAK.y), 0, worldToScreenY(-10));
+      mountainGradient.addColorStop(0, "#eef5f4");
+      mountainGradient.addColorStop(0.22, "#9eb8be");
+      mountainGradient.addColorStop(0.6, "#506f78");
+      mountainGradient.addColorStop(1, "#263f49");
+      ctx.fillStyle = mountainGradient;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(244,255,255,0.88)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let i = 0; i < SUMMIT_MOUNTAIN_POINTS.length; i++) {
+        const point = SUMMIT_MOUNTAIN_POINTS[i];
+        if (i === 0) ctx.moveTo(worldToScreenX(point[0]), worldToScreenY(point[1]));
+        else ctx.lineTo(worldToScreenX(point[0]), worldToScreenY(point[1]));
+      }
+      ctx.stroke();
+
+      const ledgeX = worldToScreenX(SUMMIT_LEDGE.x1);
+      const ledgeWidth = (SUMMIT_LEDGE.x2 - SUMMIT_LEDGE.x1) * PIXELS_PER_METRE;
+      const ledgeY = worldToScreenY(SUMMIT_LEDGE.y);
+      ctx.fillStyle = "rgba(255,216,74,0.18)";
+      ctx.fillRect(ledgeX, ledgeY - 4, ledgeWidth, 8);
+      ctx.strokeStyle = "#ffd84a";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(ledgeX, ledgeY - 5, ledgeWidth, 10);
+
+      if (engineersDropped && !antennaInstalled) {
+        const peakX = worldToScreenX(SUMMIT_PEAK.x1);
+        const peakWidth = (SUMMIT_PEAK.x2 - SUMMIT_PEAK.x1) * PIXELS_PER_METRE;
+        const peakY = worldToScreenY(SUMMIT_PEAK.y);
+        ctx.save();
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = "#ffdb5a";
+        ctx.strokeRect(peakX, peakY - 5, peakWidth, 10);
+        ctx.restore();
+        ctx.fillStyle = "#ffdb5a";
+        ctx.font = "bold 11px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("REPEATER", peakX + peakWidth / 2, peakY - 10);
+      }
+
+      if (engineersDropped && !engineersAboard) {
+        drawExpeditioner(SUMMIT_LEDGE.x1 + 11, SUMMIT_LEDGE.y + 0.2, 0);
+        drawExpeditioner(SUMMIT_LEDGE.x1 + 21, SUMMIT_LEDGE.y + 0.2, 1);
+      }
+
+      if (antennaInstalled) drawSummitAntenna();
+    }
+
+    function drawSummitAntenna() {
+      const baseX = worldToScreenX((SUMMIT_PEAK.x1 + SUMMIT_PEAK.x2) / 2);
+      const baseY = worldToScreenY(SUMMIT_PEAK.y);
+      ctx.fillStyle = "#9fc587";
+      ctx.fillRect(baseX - 15, baseY - 15, 30, 15);
+      ctx.fillStyle = "#345a4d";
+      ctx.fillRect(baseX - 12, baseY - 12, 9, 8);
+      ctx.fillStyle = "#dce8d0";
+      ctx.fillRect(baseX + 1, baseY - 12, 10, 8);
+      ctx.strokeStyle = "#dbe2df";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(baseX, baseY - 15);
+      ctx.lineTo(baseX, baseY - 76);
+      ctx.moveTo(baseX - 8, baseY - 42);
+      ctx.lineTo(baseX + 8, baseY - 42);
+      ctx.moveTo(baseX - 8, baseY - 42);
+      ctx.lineTo(baseX, baseY - 15);
+      ctx.moveTo(baseX + 8, baseY - 42);
+      ctx.lineTo(baseX, baseY - 15);
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(30,38,42,0.95)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(baseX, baseY - 70);
+      ctx.lineTo(baseX - 42, baseY - 3);
+      ctx.moveTo(baseX, baseY - 70);
+      ctx.lineTo(baseX + 42, baseY - 3);
+      ctx.stroke();
+      ctx.strokeStyle = "#f2e5ad";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(baseX, baseY - 58);
+      ctx.lineTo(baseX + 18, baseY - 58);
+      ctx.moveTo(baseX, baseY - 35);
+      ctx.lineTo(baseX + 16, baseY - 35);
+      ctx.stroke();
+    }
+
     function drawNuyina() {
       if (!nuyinaImage.complete || !nuyinaImage.naturalWidth) return;
       const width = NUYINA_SVG_WIDTH * PIXELS_PER_METRE;
@@ -1340,6 +1628,24 @@
       const top = worldToScreenY(item.y);
       const width = PALLET_WIDTH * PIXELS_PER_METRE;
       const height = PALLET_HEIGHT * PIXELS_PER_METRE;
+      if (level.mission === "summit") {
+        ctx.fillStyle = "#9fc587";
+        ctx.fillRect(left, top, width, height);
+        ctx.strokeStyle = "#30454a";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(left, top, width, height);
+        ctx.fillStyle = "#315c78";
+        ctx.fillRect(left + 3, top + 3, width * 0.3, height - 6);
+        ctx.strokeStyle = "#e5eee6";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(left + width * 0.68, top + height - 3);
+        ctx.lineTo(left + width * 0.68, top - height * 1.25);
+        ctx.moveTo(left + width * 0.68 - 6, top - height * 0.62);
+        ctx.lineTo(left + width * 0.68 + 6, top - height * 0.62);
+        ctx.stroke();
+        return;
+      }
       ctx.fillStyle = delivered ? "rgba(208,164,83,0.9)" : "#bd8746";
       ctx.fillRect(left, top, width, height);
       ctx.strokeStyle = "#39454a";
@@ -1358,7 +1664,7 @@
     }
 
     function drawSling() {
-      if (level.mission !== "sling") return;
+      if (!usesSlingLoad()) return;
       for (const delivered of deliveredPallets) drawCagePallet(delivered, true);
       if (pallet) drawCagePallet(pallet, false);
       if (cableLength <= 0.02) return;
@@ -1782,6 +2088,7 @@
       drawWater();
       drawIce();
       drawIceberg();
+      drawSummitMountain();
       drawStation();
       drawWash();
       drawShadow();
@@ -1817,6 +2124,13 @@
       }
       if (level.mission === "medical") return patientAboard ?
         "Return the patient to Nuyina for treatment" : "Land on Aurora Station helipad to board the patient";
+      if (level.mission === "summit") {
+        if (!engineersDropped) return "Land on the mountain ledge to deploy two engineers";
+        if (!antennaInstalled) return loadAttached() ?
+          "Place the radio repeater precisely on the summit" : "Return to Nuyina's cargo deck and collect the radio repeater";
+        if (!engineersAboard) return "Land on the ledge and collect the engineers";
+        return "Return the engineers to Nuyina";
+      }
       if (deliveries >= 3) return "Return to Nuyina and land";
       if (loadAttached()) return "Place cage " + (deliveries + 1) + " in the station cargo zone";
       return "Pick up cage " + (deliveries + 1) + " of 3";
@@ -1839,6 +2153,17 @@
         return patientAboard ?
           { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: shipDeckY() } :
           { x: (STATION_PAD.x1 + STATION_PAD.x2) / 2, y: STATION_PAD.y };
+      }
+      if (level.mission === "summit") {
+        if (!engineersDropped || (antennaInstalled && !engineersAboard)) {
+          return { x: (SUMMIT_LEDGE.x1 + SUMMIT_LEDGE.x2) / 2, y: SUMMIT_LEDGE.y };
+        }
+        if (!antennaInstalled) {
+          return loadAttached() ?
+            { x: (SUMMIT_PEAK.x1 + SUMMIT_PEAK.x2) / 2, y: SUMMIT_PEAK.y } :
+            { x: PALLET_PICKUP_X, y: shipCargoPadY() + PALLET_HEIGHT };
+        }
+        return { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: shipDeckY() };
       }
       if (deliveries >= 3) {
         return { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: shipDeckY() };
@@ -1945,7 +2270,8 @@
       }
 
       const objectiveWidth = Math.min(520, viewWidth - 24);
-      const objectiveHeight = level.mission === "sling" ? 84 :
+      const objectiveHeight = level.mission === "summit" ? 108 :
+        level.mission === "sling" ? 84 :
         level.mission === "rescue" || level.mission === "scout" || level.mission === "medical" ? 68 : 48;
       drawRoundedPanel(12, 104, objectiveWidth, objectiveHeight, 8,
         "rgba(5,20,29,0.78)");
@@ -1983,7 +2309,7 @@
         );
       }
 
-      if (level.mission === "sling") {
+      if (usesSlingLoad()) {
         const cableState = loadAttached() ? "ATTACHED" :
           cableLength < 0.05 ? "STOWED" :
           cableTargetLength > cableLength ? "LOWERING" :
@@ -1991,7 +2317,9 @@
         ctx.fillStyle = "#9ed5d8";
         ctx.font = "12px Trebuchet MS";
         ctx.fillText(
-          "CABLE " + cableState + "   ·   DELIVERED " + deliveries + " / 3   ·   E: LINE / RELEASE",
+          level.mission === "summit" ?
+            "CABLE " + cableState + "   ·   RADIO REPEATER   ·   E: LINE / RELEASE" :
+            "CABLE " + cableState + "   ·   DELIVERED " + deliveries + " / 3   ·   E: LINE / RELEASE",
           25, 165
         );
         const swing = slingAngleDegrees();
@@ -2005,12 +2333,14 @@
         );
       }
 
-      if (level.mission === "medical") {
+      if (level.mission === "medical" || level.mission === "summit") {
         ctx.fillStyle = "#b8dce8";
         ctx.font = "12px Trebuchet MS";
         ctx.fillText(
-          "WIND → " + medicalWindSpeed().toFixed(1) + " m/s   ·   DECK SWELL ±1.5 m",
-          25, 165
+          level.mission === "summit" ?
+            "MOUNTAIN WIND → " + medicalWindSpeed().toFixed(1) + " m/s   ·   PRECISION SUMMIT DROP" :
+            "WIND → " + medicalWindSpeed().toFixed(1) + " m/s   ·   DECK SWELL ±1.5 m",
+          25, level.mission === "summit" ? 201 : 165
         );
       }
 
@@ -2043,7 +2373,7 @@
       ctx.font = "12px Trebuchet MS";
       ctx.fillText(
         "← → / A D  TILT     ↑ ↓ / W S  COLLECTIVE     SPACE LEVEL" +
-          (level.mission === "sling" ? "     E LOAD LINE" : ""),
+          (usesSlingLoad() ? "     E LOAD LINE" : ""),
         viewWidth - 16, 28
       );
     }
@@ -2066,7 +2396,7 @@
       ctx.fillText("POLAR PILOT", viewWidth / 2, y + 90);
       ctx.fillStyle = "#cde7e9";
       ctx.font = "bold 17px Trebuchet MS";
-      ctx.fillText("FIVE ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
+      ctx.fillText("SIX ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
 
       ctx.fillStyle = "#fff";
       ctx.font = "16px Trebuchet MS";
@@ -2085,7 +2415,7 @@
       ctx.fillText("PRESS SPACE TO FLY", viewWidth / 2, y + 310);
       ctx.fillStyle = "#9ed5d8";
       ctx.font = "bold 12px Trebuchet MS";
-      ctx.fillText("1-5: JUMP TO LEVEL", viewWidth / 2, y + 335);
+      ctx.fillText("1-6: JUMP TO LEVEL", viewWidth / 2, y + 335);
     }
 
     function drawBriefing() {
@@ -2094,6 +2424,8 @@
         level.brief,
         level.mission === "sling" ?
           "E deploys or retracts the line and releases an attached cage." :
+          level.mission === "summit" ?
+            "Land on the ledge before using E to sling the repeater. A missed summit release fails the mission." :
           level.mission === "rescue" ?
             "Aim the spotlight with the mouse and hold it on the person for two seconds." :
           level.mission === "medical" ?
@@ -2110,6 +2442,7 @@
       else if (level.mission === "sling") message = "Three cages delivered and aircraft returned to Nuyina.";
       else if (level.mission === "rescue") message = "The missing expeditioner is safely back at Aurora Station.";
       else if (level.mission === "medical") message = "The patient is aboard Nuyina and receiving treatment.";
+      else if (level.mission === "summit") message = "The summit radio relay is installed and both engineers are safely back aboard.";
       drawMissionPanel(
         "MISSION COMPLETE",
         message,
@@ -2121,7 +2454,7 @@
     function drawGameComplete() {
       drawMissionPanel(
         "TOUR COMPLETE",
-        "Ice scouted, people delivered, cargo moved, and both rescue flights completed.",
+        "Ice scouted, people delivered, cargo moved, rescues completed, and the summit relay installed.",
         "Excellent flying.",
         "PRESS SPACE FOR TITLE"
       );
@@ -2199,10 +2532,10 @@
       const code = event.code;
       if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
            "KeyA", "KeyD", "KeyW", "KeyS", "KeyE", "KeyH", "Space",
-           "Digit1", "Digit2", "Digit3", "Digit4", "Digit5"].includes(code)) {
+           "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6"].includes(code)) {
         event.preventDefault();
       }
-      if (/^Digit[1-5]$/.test(code) && pressed && !event.repeat) {
+      if (/^Digit[1-6]$/.test(code) && pressed && !event.repeat) {
         startLevel(parseInt(code.slice(5), 10) - 1, false);
       } else if (code === "ArrowLeft" || code === "KeyA") input.left = pressed;
       else if (code === "ArrowRight" || code === "KeyD") input.right = pressed;
@@ -2274,6 +2607,7 @@
       helicopter.collective = collective;
       helicopter.landed = false;
       helicopter.landedAt = "";
+      helicopter.landedSurface = null;
       helicopter.facing = 1;
       autoHoverEnabled = false;
       autoHoverTargetAltitude = helicopter.y;
@@ -2310,7 +2644,7 @@
         Math.abs(helicopter.angle) <= SKID_PIVOT_MAX_ANGLE + 0.08;
 
       setAirborne((SHIP_DECK.x1 + SHIP_DECK.x2) / 2, SHIP_DECK_Y + SKID_DROP + 0.01, 0.3);
-      helicopter.angle = 20 * Math.PI / 180;
+      helicopter.angle = 8 * Math.PI / 180;
       helicopter.vy = -1;
       stepPhysics(FIXED_DT);
       result.tiltedDeckLanding = helicopter.landed && gameState === "playing" &&
@@ -2414,6 +2748,53 @@
       helicopter.vy = -4;
       stepPhysics(FIXED_DT);
       result.waterCrash = gameState === "crashed" && crashReason.indexOf("Water") === 0;
+
+      startLevel(1, true);
+      const terrainX = 580;
+      setAirborne(terrainX, terrainHeightAt(terrainX) + SKID_DROP + 0.01, 0.3);
+      helicopter.vy = -2;
+      stepPhysics(FIXED_DT);
+      result.terrainSkidLanding = helicopter.landed && helicopter.landedSurface.kind === "terrain";
+
+      startLevel(1, true);
+      const roof = BUILDINGS[0];
+      setAirborne((roof.x1 + roof.x2) / 2, roof.y2 + SKID_DROP + 0.01, 0.3);
+      helicopter.vy = -2;
+      stepPhysics(FIXED_DT);
+      result.roofSkidLanding = helicopter.landed && helicopter.landedSurface.kind === "roof";
+
+      startLevel(0, true);
+      icebergScouted = true;
+      const workingDeckX = SHIP_EXPOSED_DECK.x1 + 6;
+      setAirborne(workingDeckX, shipDeckY() + SKID_DROP + 0.01, 0.3);
+      helicopter.vy = -2;
+      stepPhysics(FIXED_DT);
+      result.exposedDeckSkidLanding = helicopter.landed &&
+        helicopter.landedSurface.kind === "shipDeck" && gameState === "playing";
+
+      startLevel(1, true);
+      const collisionTerrainY = terrainHeightAt(terrainX);
+      setAirborne(terrainX, collisionTerrainY + 1.52, 0.3);
+      helicopter.angle = 25 * Math.PI / 180;
+      checkContact(helicopterPose());
+      result.cockpitTerrainCrash = gameState === "crashed" && crashReason.indexOf("Cockpit or rotor") === 0;
+
+      startLevel(1, true);
+      setAirborne(terrainX, collisionTerrainY + 0.44, 0.3);
+      helicopter.angle = 25 * Math.PI / 180;
+      checkContact(helicopterPose());
+      result.mainRotorTerrainCrash = gameState === "crashed" && crashReason.indexOf("Cockpit or rotor") === 0;
+
+      startLevel(1, true);
+      setAirborne(terrainX, collisionTerrainY + 2.7, 0.3);
+      helicopter.angle = -25 * Math.PI / 180;
+      checkContact(helicopterPose());
+      result.tailRotorTerrainCrash = gameState === "crashed" && crashReason.indexOf("Cockpit or rotor") === 0;
+
+      result.shipProfileDeck = Math.abs(shipSolidHeightAt(SHIP_EXPOSED_DECK.x1 + 8) - shipDeckY()) < 0.02;
+      result.shipProfileSuperstructure = shipSolidHeightAt(NUYINA_WORLD_X + 60) > shipDeckY() + 10;
+      result.shipProfileNoPhantomWall = shipSolidHeightAt(NUYINA_WORLD_X + 105) < shipDeckY() + 1;
+      result.shipProfileBoundary = !Number.isFinite(shipSolidHeightAt(NUYINA_WORLD_X - 1));
 
       startLevel(0, true);
       setAirborne(SCOUT_X, SCOUT_PEAK_Y + 25, GRAVITY / MAX_LIFT_ACCEL);
@@ -2565,6 +2946,48 @@
       result.medicalLevelSkip =
         levelIndex === 4 && level.mission === "medical" && gameState === "briefing";
 
+      startLevel(5, true);
+      result.summitStartsOnShip = helicopter.landed && helicopter.landedAt === SHIP_DECK.name &&
+        !level.station && !!pallet && engineersAboard && !engineersDropped && !antennaInstalled;
+      result.summitWindActive = Math.abs(medicalWindAcceleration()) > MEDICAL_WIND_BASE_ACCEL;
+      helicopter.x = (SUMMIT_LEDGE.x1 + SUMMIT_LEDGE.x2) / 2;
+      settleLanding(landingSurfaceAt(helicopter.x));
+      result.summitEngineersDropped = engineersDropped && !engineersAboard &&
+        activeObjective().x === PALLET_PICKUP_X;
+
+      pallet.status = "attached";
+      pallet.x = SUMMIT_PEAK.x1 - 5;
+      pallet.y = SUMMIT_PEAK.y + PALLET_HEIGHT;
+      pallet.vx = 0;
+      pallet.vy = 0;
+      releasePallet();
+      result.summitMissedAntennaFails = gameState === "crashed" &&
+        crashReason.indexOf("Radio repeater placement failed") === 0;
+
+      startLevel(5, true);
+      helicopter.x = (SUMMIT_LEDGE.x1 + SUMMIT_LEDGE.x2) / 2;
+      settleLanding(landingSurfaceAt(helicopter.x));
+      pallet.status = "attached";
+      pallet.x = (SUMMIT_PEAK.x1 + SUMMIT_PEAK.x2) / 2;
+      pallet.y = SUMMIT_PEAK.y + PALLET_HEIGHT;
+      pallet.vx = 0;
+      pallet.vy = 0;
+      releasePallet();
+      result.summitAntennaInstalled = antennaInstalled && pallet === null && gameState === "playing";
+      helicopter.x = (SUMMIT_LEDGE.x1 + SUMMIT_LEDGE.x2) / 2;
+      settleLanding(landingSurfaceAt(helicopter.x));
+      result.summitEngineersRecovered = engineersAboard &&
+        activeObjective().x === (SHIP_DECK.x1 + SHIP_DECK.x2) / 2;
+      helicopter.x = (SHIP_DECK.x1 + SHIP_DECK.x2) / 2;
+      settleLanding(shipDeckSurface());
+      result.summitComplete = gameState === "levelComplete";
+      onKey(
+        { code: "Digit6", repeat: false, preventDefault: function() {} },
+        true
+      );
+      result.summitLevelSkip =
+        levelIndex === 5 && level.mission === "summit" && gameState === "briefing";
+
       startLevel(0, true);
       simulateFrames(20);
       result.nonMedicalDeckStatic = shipSwellOffset() === 0 &&
@@ -2598,6 +3021,16 @@
         result.safeLanding &&
         result.hardLandingCrash &&
         result.waterCrash &&
+        result.terrainSkidLanding &&
+        result.roofSkidLanding &&
+        result.exposedDeckSkidLanding &&
+        result.cockpitTerrainCrash &&
+        result.mainRotorTerrainCrash &&
+        result.tailRotorTerrainCrash &&
+        result.shipProfileDeck &&
+        result.shipProfileSuperstructure &&
+        result.shipProfileNoPhantomWall &&
+        result.shipProfileBoundary &&
         result.scoutHoverProgress &&
         result.icebergScouted &&
         result.scoutRetargeted &&
@@ -2636,6 +3069,14 @@
         result.medicalPatientBoards &&
         result.medicalComplete &&
         result.medicalLevelSkip &&
+        result.summitStartsOnShip &&
+        result.summitWindActive &&
+        result.summitEngineersDropped &&
+        result.summitMissedAntennaFails &&
+        result.summitAntennaInstalled &&
+        result.summitEngineersRecovered &&
+        result.summitComplete &&
+        result.summitLevelSkip &&
         result.nonMedicalDeckStatic;
 
       resetGame(false);
@@ -2650,7 +3091,7 @@
     resetGame(false);
     if (location.hash === "#test") runSelfTests();
     else {
-      const playHash = /^#play([1-5])$/.exec(location.hash);
+      const playHash = /^#play([1-6])$/.exec(location.hash);
       if (playHash) startLevel(parseInt(playHash[1], 10) - 1, true);
       requestAnimationFrame(frame);
     }
