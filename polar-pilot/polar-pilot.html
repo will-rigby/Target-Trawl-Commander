@@ -374,8 +374,10 @@
     }
 
     function shipCentreX() {
-      return (SHIP_DECK.x1 + SHIP_DECK.x2) / 2 + shipXOffset();
-    }
+    // Use the centre of the entire ship artwork, not the centre of the helipad.
+    // This is the reference point for Level 7 heave and deck vertical velocity.
+    return NUYINA_WORLD_X + NUYINA_SVG_WIDTH / 2 + shipXOffset();
+}
 
     function shipSwellOffset() {
       if (!level || level.mission === "xbt") return level && level.mission === "xbt" ? waterSurfaceAt(shipCentreX()) : 0;
@@ -2659,7 +2661,7 @@
           level.mission === "medical" ?
             "Wind pushes the aircraft east. Time your return landing to the moving deck." :
           level.mission === "xbt" ?
-            "Hold 10 m above the waves 50 m astern. A stable hover launches each probe automatically; protect the wire for 20 seconds." :
+            "Hold a stable hover to deploy an XBT and obtain an oceanographic profile." :
             "Follow the yellow objective chevron.",
         "PRESS SPACE TO BEGIN"
       );
