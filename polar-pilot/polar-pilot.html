@@ -102,6 +102,13 @@
     const SHIP_DECK_Y = 13.488146;
     const SHIP_SWELL_AMPLITUDE = 1.5;
     const SHIP_SWELL_PERIOD = 8;
+    const XBT_SHIP_SPEED = 10 / 1.94384; // 10 kn in m/s
+    const XBT_CASTS_REQUIRED = 3;
+    const XBT_CAST_DURATION = 20;
+    const XBT_HOVER_HOLD = 1.5;
+    const XBT_TARGET_ASTERN = 50;
+    const XBT_HOVER_X_TOLERANCE = 5;
+    const XBT_WIRE_X_TOLERANCE = 8;
     const MEDICAL_WIND_BASE_ACCEL = 1.15;
     const MEDICAL_WIND_GUST_ACCEL = 0.5;
     const SUMMIT_WIND_BASE_ACCEL = 1.65;
@@ -234,6 +241,14 @@
         worldMaxX: 1250,
         brief: "In strong mountain winds, land two engineers on the ledge, sling Nuyina's radio repeater onto the narrow summit, collect the team, and return to the ship.",
       },
+      {
+        number: 7,
+        name: "XBT Ocean Survey",
+        mission: "xbt",
+        station: false,
+        worldMaxX: 2500,
+        brief: "Nuyina is underway in open ocean. Hold a precise hover 50 m astern, complete three expendable bathythermograph casts, then land on the heaving deck.",
+      },
     ];
 
     const input = {
@@ -294,6 +309,12 @@
     let testMode = false;
     let autoHoverEnabled = false;
     let autoHoverTargetAltitude = 0;
+    let xbtCasts = 0;
+    let xbtHoverTimer = 0;
+    let xbtProbe = null;
+    let xbtAbortReason = "";
+    let xbtSiteX = null;
+    let xbtFallingProbe = null;
 
     const snow = [];
     const washParticles = [];
@@ -340,8 +361,25 @@
       return a + (b - a) * amount;
     }
 
+    function waterSurfaceAt(x) {
+      if (!level || level.mission !== "xbt") return 0;
+      const travel = x - elapsed * 4.8;
+      return 2.5 * Math.sin(Math.PI * 2 * travel / 92) +
+        0.7 * Math.sin(Math.PI * 2 * travel / 43 + 0.9) +
+        5 * Math.sin(Math.PI * 2 * travel / 265 + 1.7);
+    }
+
+    function shipXOffset() {
+      return level && level.mission === "xbt" ? -elapsed * XBT_SHIP_SPEED : 0;
+    }
+
+    function shipCentreX() {
+      return (SHIP_DECK.x1 + SHIP_DECK.x2) / 2 + shipXOffset();
+    }
+
     function shipSwellOffset() {
-      if (!level || level.mission !== "medical") return 0;
+      if (!level || level.mission === "xbt") return level && level.mission === "xbt" ? waterSurfaceAt(shipCentreX()) : 0;
+      if (level.mission !== "medical") return 0;
       return SHIP_SWELL_AMPLITUDE * Math.sin(Math.PI * 2 * elapsed / SHIP_SWELL_PERIOD);
     }
 
@@ -350,15 +388,22 @@
     }
 
     function shipDeckVelocity() {
-      if (!level || level.mission !== "medical") return 0;
+      if (!level || (level.mission !== "medical" && level.mission !== "xbt")) return 0;
+      if (level.mission === "xbt") {
+        const travel = shipCentreX() - elapsed * 4.8;
+        const slope = 2.5 * Math.PI * 2 / 92 * Math.cos(Math.PI * 2 * travel / 92) +
+          0.7 * Math.PI * 2 / 43 * Math.cos(Math.PI * 2 * travel / 43 + 0.9) +
+          5 * Math.PI * 2 / 265 * Math.cos(Math.PI * 2 * travel / 265 + 1.7);
+        return slope * (-XBT_SHIP_SPEED - 4.8);
+      }
       return SHIP_SWELL_AMPLITUDE * Math.PI * 2 / SHIP_SWELL_PERIOD *
         Math.cos(Math.PI * 2 * elapsed / SHIP_SWELL_PERIOD);
     }
 
     function shipDeckSurface() {
       return {
-        x1: SHIP_DECK.x1,
-        x2: SHIP_DECK.x2,
+        x1: SHIP_DECK.x1 + shipXOffset(),
+        x2: SHIP_DECK.x2 + shipXOffset(),
         y: shipDeckY(),
         name: SHIP_DECK.name,
         kind: "shipHelipad",
@@ -375,14 +420,16 @@
     }
 
     function medicalWindAcceleration() {
-      if (!level || (level.mission !== "medical" && level.mission !== "summit")) return 0;
+      if (!level || (level.mission !== "medical" && level.mission !== "summit" && level.mission !== "xbt")) return 0;
+      if (level.mission === "xbt") return 0.10 + 0.05 * Math.sin(elapsed * 0.6) + 0.025 * Math.sin(elapsed * 1.7);
       const base = level.mission === "summit" ? SUMMIT_WIND_BASE_ACCEL : MEDICAL_WIND_BASE_ACCEL;
       const gust = level.mission === "summit" ? SUMMIT_WIND_GUST_ACCEL : MEDICAL_WIND_GUST_ACCEL;
       return base + gust * Math.sin(elapsed * 0.9) + gust * 0.45 * Math.sin(elapsed * 2.1 + 0.7);
     }
 
     function medicalWindSpeed() {
-      if (!level || (level.mission !== "medical" && level.mission !== "summit")) return 0;
+      if (!level || (level.mission !== "medical" && level.mission !== "summit" && level.mission !== "xbt")) return 0;
+      if (level.mission === "xbt") return 1.5 + 0.5 * Math.sin(elapsed * 0.6);
       const base = level.mission === "summit" ? 18 : 12;
       const gust = level.mission === "summit" ? 5.2 : 3.5;
       return base + gust * Math.sin(elapsed * 0.9) + gust * 0.45 * Math.sin(elapsed * 2.1 + 0.7);
@@ -482,6 +529,12 @@
       pallet = null;
       cableLength = 0;
       cableTargetLength = 0;
+      xbtCasts = 0;
+      xbtHoverTimer = 0;
+      xbtProbe = null;
+      xbtAbortReason = "";
+      xbtSiteX = null;
+      xbtFallingProbe = null;
       missionNotice = "";
       missionNoticeTimer = 0;
       if (usesSlingLoad()) spawnPallet();
@@ -557,7 +610,7 @@
     }
 
     function shipSolidHeightAt(x) {
-      const svgX = x - NUYINA_WORLD_X;
+      const svgX = x - NUYINA_WORLD_X - shipXOffset();
       const points = NUYINA_SOLID_PROFILE_SVG;
       if (svgX < points[0][0] || svgX > points[points.length - 1][0]) return -Infinity;
       for (let i = 1; i < points.length; i++) {
@@ -574,11 +627,12 @@
     }
 
     function shipLandingSurfaceAt(x) {
-      if (x < SHIP_EXPOSED_DECK.x1 || x > SHIP_EXPOSED_DECK.x2) return null;
+      const offset = shipXOffset();
+      if (x < SHIP_EXPOSED_DECK.x1 + offset || x > SHIP_EXPOSED_DECK.x2 + offset) return null;
       return {
-        x1: SHIP_EXPOSED_DECK.x1, x2: SHIP_EXPOSED_DECK.x2, y: shipDeckY(),
+        x1: SHIP_EXPOSED_DECK.x1 + offset, x2: SHIP_EXPOSED_DECK.x2 + offset, y: shipDeckY(),
         name: SHIP_DECK.name,
-        kind: x >= SHIP_DECK.x1 && x <= SHIP_DECK.x2 ? "shipHelipad" : "shipDeck",
+        kind: x >= SHIP_DECK.x1 + offset && x <= SHIP_DECK.x2 + offset ? "shipHelipad" : "shipDeck",
       };
     }
 
@@ -742,6 +796,8 @@
         } else if (surface.kind === "shipHelipad" && engineersAboard && antennaInstalled) {
           completeLevel();
         }
+      } else if (level.mission === "xbt" && surface.kind === "shipHelipad" && xbtCasts >= XBT_CASTS_REQUIRED) {
+        completeLevel();
       }
     }
 
@@ -750,6 +806,9 @@
       const surfaceHeight = surfaceHeightAt(surface, helicopter.x);
       const lowestSkid = Math.min(...skidContacts(helicopterPose()).map(point => point.y));
       helicopter.y += surfaceHeight - lowestSkid;
+      if (level.mission === "xbt" && (surface.kind === "shipHelipad" || surface.kind === "shipDeck")) {
+        helicopter.x -= XBT_SHIP_SPEED * FIXED_DT;
+      }
       helicopter.vx = 0;
       helicopter.vy = surfaceVerticalVelocity(surface);
       helicopter.landed = true;
@@ -803,12 +862,13 @@
         return;
       }
 
-      if (lowestSkidAltitude() <= 0) {
+      if (lowestSkidAltitude() <= waterSurfaceAt(helicopter.x)) {
         crash("Water impact — keep enough collective to arrest the descent.");
         return;
       }
 
-      if (helicopter.x < WORLD_MIN_X || helicopter.x > level.worldMaxX) {
+      if (level.mission !== "xbt" &&
+          (helicopter.x < WORLD_MIN_X || helicopter.x > level.worldMaxX)) {
         crash("You left the local flight area.");
       }
     }
@@ -1030,6 +1090,75 @@
         Math.hypot(helicopter.vx, helicopter.vy) <= 3;
     }
 
+    function xbtTargetX() {
+      if (xbtSiteX !== null) return xbtSiteX;
+      // Nuyina's bow faces left, so its stern is the right-hand end of the
+      // artwork. Create a fixed ocean station 50 m clear of that end.
+      xbtSiteX = NUYINA_WORLD_X + NUYINA_SVG_WIDTH + shipXOffset() + XBT_TARGET_ASTERN;
+      return xbtSiteX;
+    }
+
+    function xbtHoverValid() {
+      const surface = waterSurfaceAt(helicopter.x);
+      const altitude = helicopter.y - surface;
+      return level.mission === "xbt" && !helicopter.landed && !xbtProbe &&
+        xbtCasts < XBT_CASTS_REQUIRED && Math.abs(helicopter.x - xbtTargetX()) <= XBT_HOVER_X_TOLERANCE &&
+        altitude >= 8 && altitude <= 12 && Math.abs(helicopter.vx) <= 1.5 && Math.abs(helicopter.vy) <= 1.5;
+    }
+
+    function abortXbtCast(reason) {
+      xbtProbe = null;
+      xbtHoverTimer = 0;
+      xbtAbortReason = reason;
+      xbtSiteX = null;
+      setMissionNotice("XBT ABORTED — " + reason);
+    }
+
+    function updateXbt(dt) {
+      if (xbtFallingProbe) {
+        xbtFallingProbe.time += dt;
+        xbtFallingProbe.vy -= 1.8 * dt;
+        xbtFallingProbe.y += xbtFallingProbe.vy * dt;
+        xbtFallingProbe.lineTopY += xbtFallingProbe.vy * dt;
+        if (xbtFallingProbe.time > 4.5) xbtFallingProbe = null;
+      }
+      if (xbtProbe) {
+        const surface = waterSurfaceAt(helicopter.x);
+        if (Math.abs(helicopter.x - xbtProbe.x) > XBT_WIRE_X_TOLERANCE) return abortXbtCast("TOO FAR FROM WIRE");
+        if (helicopter.y - surface > 20) return abortXbtCast("TOO HIGH ABOVE WATER");
+        if (Math.abs(helicopter.vx) > 5 || Math.abs(helicopter.vy) > 5) return abortXbtCast("WIRE SNAPPED — SPEED LIMIT");
+        xbtProbe.time += dt;
+        xbtProbe.y = xbtProbe.startY - xbtProbe.time * 4.5;
+        const probeSurface = waterSurfaceAt(xbtProbe.x);
+        if (!xbtProbe.splashed && xbtProbe.y <= probeSurface) {
+          xbtProbe.splashed = true;
+          xbtProbe.splashTime = xbtProbe.time;
+        }
+        if (xbtProbe.time >= XBT_CAST_DURATION) {
+          xbtCasts++;
+          xbtFallingProbe = {
+            x: xbtProbe.x, y: xbtProbe.y, vy: -5.5, time: 0,
+            lineTopX: helicopter.x, lineTopY: helicopter.y - 1.5,
+            splashed: true, splashTime: xbtProbe.splashTime,
+          };
+          xbtProbe = null;
+          xbtHoverTimer = 0;
+          xbtSiteX = null;
+          setMissionNotice(xbtCasts >= XBT_CASTS_REQUIRED ?
+            "THREE XBT CASTS COMPLETE — RETURN TO NUYINA" :
+            "XBT CAST COMPLETE — " + xbtCasts + " / " + XBT_CASTS_REQUIRED);
+        }
+        return;
+      }
+      if (xbtCasts >= XBT_CASTS_REQUIRED) return;
+      xbtHoverTimer = xbtHoverValid() ? Math.min(XBT_HOVER_HOLD, xbtHoverTimer + dt) : 0;
+      if (xbtHoverTimer >= XBT_HOVER_HOLD) {
+        xbtProbe = { x: helicopter.x, startY: helicopter.y - 1.8, y: helicopter.y - 1.8, time: 0, splashed: false, splashTime: 0 };
+        xbtAbortReason = "";
+        setMissionNotice("XBT DEPLOYED — HOLD THE WIRE STEADY");
+      }
+    }
+
     function updateMission(dt) {
       if (missionNoticeTimer > 0) {
         missionNoticeTimer -= dt;
@@ -1051,6 +1180,7 @@
           setMissionNotice("EXPEDITIONER LOCATED - LAND IN THE CLEARING");
         }
       }
+      if (level.mission === "xbt") updateXbt(dt);
     }
 
     function stepPhysics(dt) {
@@ -1127,6 +1257,10 @@
           helicopter.landed = false;
           helicopter.landedAt = "";
           helicopter.landedSurface = null;
+          if (level.mission === "xbt" &&
+              (landedSurface.kind === "shipHelipad" || landedSurface.kind === "shipDeck")) {
+            helicopter.vx = -XBT_SHIP_SPEED;
+          }
           helicopter.vy = surfaceVerticalVelocity(landedSurface) + 0.08;
         }
       } else {
@@ -1164,7 +1298,7 @@
         if (p.life <= 0) washParticles.splice(i, 1);
       }
 
-      const floor = Math.max(0, solidHeightAt(helicopter.x));
+      const floor = Math.max(waterSurfaceAt(helicopter.x), solidHeightAt(helicopter.x));
       const height = helicopter.y - floor;
       if (!helicopter.landed && helicopter.collective > 0.38 && height < 25 &&
           washParticles.length < 70 && Math.random() < helicopter.collective * 0.7) {
@@ -1264,6 +1398,7 @@
     }
 
     function drawMountains() {
+      if (level && level.mission === "xbt") return;
       const seaY = worldToScreenY(0);
       const offset = -((cameraX * 0.13) % 720);
       ctx.fillStyle = "#6d8d9b";
@@ -1297,11 +1432,19 @@
 
     function drawWater() {
       const seaY = worldToScreenY(0);
-      const gradient = ctx.createLinearGradient(0, seaY, 0, viewHeight);
+      const gradient = ctx.createLinearGradient(0, seaY - 30, 0, viewHeight);
       gradient.addColorStop(0, "#1d6177");
       gradient.addColorStop(1, "#052f47");
       ctx.fillStyle = gradient;
-      ctx.fillRect(0, seaY, viewWidth, viewHeight - seaY);
+      ctx.beginPath();
+      ctx.moveTo(0, viewHeight);
+      for (let sx = 0; sx <= viewWidth + 8; sx += 8) {
+        const wx = cameraX + (sx - viewWidth / 2) / PIXELS_PER_METRE;
+        ctx.lineTo(sx, worldToScreenY(waterSurfaceAt(wx)));
+      }
+      ctx.lineTo(viewWidth, viewHeight);
+      ctx.closePath();
+      ctx.fill();
 
       ctx.lineWidth = 1.2;
       for (let row = 0; row < 8; row++) {
@@ -1310,7 +1453,8 @@
         ctx.beginPath();
         const phase = elapsed * (0.8 + row * 0.05) + row;
         for (let x = -20; x <= viewWidth + 20; x += 12) {
-          const waveY = y + Math.sin(x * 0.032 + phase) * (1.5 + row * 0.12);
+          const wx = cameraX + (x - viewWidth / 2) / PIXELS_PER_METRE;
+          const waveY = y - waterSurfaceAt(wx) * PIXELS_PER_METRE + Math.sin(x * 0.032 + phase) * (1.5 + row * 0.12);
           if (x === -20) ctx.moveTo(x, waveY);
           else ctx.lineTo(x, waveY);
         }
@@ -1516,7 +1660,7 @@
       const height = NUYINA_SVG_HEIGHT * PIXELS_PER_METRE;
       ctx.drawImage(
         nuyinaImage,
-        worldToScreenX(NUYINA_WORLD_X),
+        worldToScreenX(NUYINA_WORLD_X + shipXOffset()),
         worldToScreenY(shipSwellOffset() + NUYINA_ARTWORK_Y_OFFSET) - height,
         width, height
       );
@@ -1685,6 +1829,62 @@
       }
     }
 
+    function drawXbt() {
+      if (level.mission !== "xbt") return;
+      const targetX = xbtTargetX();
+      if (xbtCasts < XBT_CASTS_REQUIRED && !xbtProbe) {
+        const left = worldToScreenX(targetX - XBT_HOVER_X_TOLERANCE);
+        const right = worldToScreenX(targetX + XBT_HOVER_X_TOLERANCE);
+        const top = worldToScreenY(waterSurfaceAt(targetX) + 12);
+        const bottom = worldToScreenY(waterSurfaceAt(targetX) + 8);
+        ctx.save();
+        ctx.setLineDash([5, 4]);
+        ctx.fillStyle = "rgba(87,220,190,0.10)";
+        ctx.strokeStyle = "#65e4b0";
+        ctx.fillRect(left, top, right - left, bottom - top);
+        ctx.strokeRect(left, top, right - left, bottom - top);
+        ctx.restore();
+      }
+      if (!xbtProbe && !xbtFallingProbe) return;
+      const probe = xbtProbe || xbtFallingProbe;
+      const anchor = { x: helicopter.x, y: helicopter.y - 1.5 };
+      ctx.strokeStyle = "rgba(235,239,212,0.86)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      const lineTopX = xbtProbe ? anchor.x : probe.lineTopX;
+      const lineTopY = xbtProbe ? anchor.y : probe.lineTopY;
+      ctx.moveTo(worldToScreenX(lineTopX), worldToScreenY(lineTopY));
+      ctx.lineTo(worldToScreenX(probe.x), worldToScreenY(probe.y));
+      ctx.stroke();
+      ctx.fillStyle = "#f5c84c";
+      ctx.fillRect(worldToScreenX(probe.x) - 2, worldToScreenY(probe.y) - 5, 4, 10);
+      const splashAge = probe.time - probe.splashTime;
+      if (probe.splashed && splashAge >= 0 && splashAge < 1.2) {
+        const splashY = worldToScreenY(waterSurfaceAt(probe.x));
+        const radius = 8 + splashAge * 24;
+        ctx.strokeStyle = "rgba(222,249,255,0.85)";
+        ctx.beginPath(); ctx.ellipse(worldToScreenX(probe.x), splashY, radius, radius * 0.28, 0, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+
+    function drawXbtPip() {
+      if (level.mission !== "xbt" || (!xbtProbe && !xbtFallingProbe)) return;
+      const probe = xbtProbe || xbtFallingProbe;
+      const w = Math.min(220, viewWidth * 0.28), h = w * 0.62, x = viewWidth - w - 16, y = 16;
+      drawRoundedPanel(x, y, w, h, 8, "rgba(4,18,29,0.9)");
+      const depth = Math.max(0, waterSurfaceAt(probe.x) - probe.y);
+      const g = ctx.createLinearGradient(0, y + 24, 0, y + h - 8);
+      g.addColorStop(0, "#287991"); g.addColorStop(1, depth > 20 ? "#041525" : "#0b3854");
+      ctx.fillStyle = g; ctx.fillRect(x + 7, y + 23, w - 14, h - 30);
+      ctx.fillStyle = "#dffaff"; ctx.font = "bold 11px Trebuchet MS"; ctx.textAlign = "left";
+      ctx.fillText("XBT PROBE CAM", x + 12, y + 16);
+      const py = y + 37 + clamp(depth * 1.25, 0, h - 55);
+      if (!probe.splashed) { ctx.fillStyle = "rgba(234,250,255,0.9)"; ctx.fillRect(x + 7, y + 37, w - 14, 2); }
+      ctx.fillStyle = "#f5c84c"; ctx.fillRect(x + w / 2 - 3, py - 8, 6, 16);
+      if (probe.splashed) for (let i = 0; i < 9; i++) { ctx.fillStyle = "rgba(213,244,255," + (0.25 + (i % 3) * 0.16) + ")"; ctx.beginPath(); ctx.arc(x + w / 2 + Math.sin(i * 2.4 + elapsed) * (8 + i * 2), py - 10 - i * 6, 1 + i % 2, 0, Math.PI * 2); ctx.fill(); }
+      ctx.fillStyle = "#c8eced"; ctx.font = "11px Trebuchet MS"; ctx.fillText("DEPTH " + depth.toFixed(0) + " m", x + 12, y + h - 10);
+    }
+
     function drawWash() {
       ctx.lineCap = "round";
       for (const particle of washParticles) {
@@ -1702,7 +1902,7 @@
     }
 
     function drawShadow() {
-      const floor = Math.max(0, solidHeightAt(helicopter.x));
+      const floor = Math.max(waterSurfaceAt(helicopter.x), solidHeightAt(helicopter.x));
       const height = helicopter.y - floor;
       if (height < 0 || height > 80) return;
       const alpha = clamp(0.32 - height / 280, 0.04, 0.3);
@@ -2093,12 +2293,14 @@
       drawWash();
       drawShadow();
       drawSling();
+      drawXbt();
       drawRescueExpeditioner();
       updateAndDrawSnow(realDt);
       drawNightVeil();
       drawSpotlight();
       drawHelicopter();
       drawFlightReadout();
+      drawXbtPip();
     }
 
     function drawRoundedPanel(x, y, width, height, radius, fill) {
@@ -2124,6 +2326,11 @@
       }
       if (level.mission === "medical") return patientAboard ?
         "Return the patient to Nuyina for treatment" : "Land on Aurora Station helipad to board the patient";
+      if (level.mission === "xbt") {
+        if (xbtCasts >= XBT_CASTS_REQUIRED) return "All XBT casts complete — return to Nuyina and land";
+        return xbtProbe ? "Hold position: cast " + (xbtCasts + 1) + " — " + Math.max(0, XBT_CAST_DURATION - xbtProbe.time).toFixed(1) + " s" :
+          "Hover 50 m astern at 10 m above the waves — cast " + (xbtCasts + 1) + " / 3";
+      }
       if (level.mission === "summit") {
         if (!engineersDropped) return "Land on the mountain ledge to deploy two engineers";
         if (!antennaInstalled) return loadAttached() ?
@@ -2153,6 +2360,11 @@
         return patientAboard ?
           { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: shipDeckY() } :
           { x: (STATION_PAD.x1 + STATION_PAD.x2) / 2, y: STATION_PAD.y };
+      }
+      if (level.mission === "xbt") {
+        return xbtCasts >= XBT_CASTS_REQUIRED ?
+          { x: shipCentreX(), y: shipDeckY() } :
+          { x: xbtTargetX(), y: waterSurfaceAt(xbtTargetX()) + 10 };
       }
       if (level.mission === "summit") {
         if (!engineersDropped || (antennaInstalled && !engineersAboard)) {
@@ -2271,6 +2483,7 @@
 
       const objectiveWidth = Math.min(520, viewWidth - 24);
       const objectiveHeight = level.mission === "summit" ? 108 :
+        level.mission === "xbt" ? 91 :
         level.mission === "sling" ? 84 :
         level.mission === "rescue" || level.mission === "scout" || level.mission === "medical" ? 68 : 48;
       drawRoundedPanel(12, 104, objectiveWidth, objectiveHeight, 8,
@@ -2344,6 +2557,21 @@
         );
       }
 
+      if (level.mission === "xbt") {
+        const detailY = 165;
+        ctx.fillStyle = xbtProbe ? "#ffdc78" : xbtHoverValid() ? "#65e4b0" : "#b8dce8";
+        ctx.font = "12px Trebuchet MS";
+        const status = xbtProbe ? "WIRE GOOD — H/V LIMIT 5 m/s, ALT <20 m" :
+          (xbtAbortReason ? "LAST ABORT: " + xbtAbortReason :
+            "HOVER LOCK " + (xbtHoverTimer / XBT_HOVER_HOLD * 100).toFixed(0) + "% — 8–12 m AGL");
+        ctx.fillText("XBT " + xbtCasts + " / " + XBT_CASTS_REQUIRED + "   ·   " + status, 25, detailY);
+        if (xbtProbe) {
+          const p = clamp(xbtProbe.time / XBT_CAST_DURATION, 0, 1);
+          ctx.fillStyle = "rgba(255,255,255,0.18)"; ctx.fillRect(25, 174, 230, 8);
+          ctx.fillStyle = "#65e4b0"; ctx.fillRect(25, 174, 230 * p, 8);
+        }
+      }
+
       if (missionNotice) {
         const noticeWidth = Math.min(480, viewWidth - 30);
         drawRoundedPanel(
@@ -2396,11 +2624,11 @@
       ctx.fillText("POLAR PILOT", viewWidth / 2, y + 90);
       ctx.fillStyle = "#cde7e9";
       ctx.font = "bold 17px Trebuchet MS";
-      ctx.fillText("SIX ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
+      ctx.fillText("SEVEN ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
 
       ctx.fillStyle = "#fff";
       ctx.font = "16px Trebuchet MS";
-      ctx.fillText("Scout ice, carry people and cargo, and master rescue flights", viewWidth / 2, y + 172);
+      ctx.fillText("Scout ice, carry people and cargo, and deploy ocean probes", viewWidth / 2, y + 172);
       ctx.fillStyle = "#9ed5d8";
       ctx.fillText("LEFT / RIGHT · A / D", viewWidth / 2 - 136, y + 215);
       ctx.fillText("UP / DOWN · W / S", viewWidth / 2 + 136, y + 215);
@@ -2415,7 +2643,7 @@
       ctx.fillText("PRESS SPACE TO FLY", viewWidth / 2, y + 310);
       ctx.fillStyle = "#9ed5d8";
       ctx.font = "bold 12px Trebuchet MS";
-      ctx.fillText("1-6: JUMP TO LEVEL", viewWidth / 2, y + 335);
+      ctx.fillText("1-7: JUMP TO LEVEL", viewWidth / 2, y + 335);
     }
 
     function drawBriefing() {
@@ -2430,6 +2658,8 @@
             "Aim the spotlight with the mouse and hold it on the person for two seconds." :
           level.mission === "medical" ?
             "Wind pushes the aircraft east. Time your return landing to the moving deck." :
+          level.mission === "xbt" ?
+            "Hold 10 m above the waves 50 m astern. A stable hover launches each probe automatically; protect the wire for 20 seconds." :
             "Follow the yellow objective chevron.",
         "PRESS SPACE TO BEGIN"
       );
@@ -2443,6 +2673,7 @@
       else if (level.mission === "rescue") message = "The missing expeditioner is safely back at Aurora Station.";
       else if (level.mission === "medical") message = "The patient is aboard Nuyina and receiving treatment.";
       else if (level.mission === "summit") message = "The summit radio relay is installed and both engineers are safely back aboard.";
+      else if (level.mission === "xbt") message = "Three XBT profiles are complete and the aircraft is safely back aboard Nuyina.";
       drawMissionPanel(
         "MISSION COMPLETE",
         message,
@@ -2454,7 +2685,7 @@
     function drawGameComplete() {
       drawMissionPanel(
         "TOUR COMPLETE",
-        "Ice scouted, people delivered, cargo moved, rescues completed, and the summit relay installed.",
+        "Ice scouted, people delivered, cargo moved, rescues completed, summit relay installed, and ocean profiles collected.",
         "Excellent flying.",
         "PRESS SPACE FOR TITLE"
       );
@@ -2532,10 +2763,10 @@
       const code = event.code;
       if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
            "KeyA", "KeyD", "KeyW", "KeyS", "KeyE", "KeyH", "Space",
-           "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6"].includes(code)) {
+           "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7"].includes(code)) {
         event.preventDefault();
       }
-      if (/^Digit[1-6]$/.test(code) && pressed && !event.repeat) {
+      if (/^Digit[1-7]$/.test(code) && pressed && !event.repeat) {
         startLevel(parseInt(code.slice(5), 10) - 1, false);
       } else if (code === "ArrowLeft" || code === "KeyA") input.left = pressed;
       else if (code === "ArrowRight" || code === "KeyD") input.right = pressed;
@@ -2988,6 +3219,28 @@
       result.summitLevelSkip =
         levelIndex === 5 && level.mission === "summit" && gameState === "briefing";
 
+      startLevel(6, true);
+      setAirborne(xbtTargetX(), waterSurfaceAt(xbtTargetX()) + 10, 0.55);
+      updateXbt(XBT_HOVER_HOLD);
+      result.xbtAutoLaunch = !!xbtProbe;
+      updateXbt(XBT_CAST_DURATION);
+      result.xbtFirstCast = xbtCasts === 1 && !xbtProbe;
+      setAirborne(xbtTargetX(), waterSurfaceAt(xbtTargetX()) + 10, 0.55);
+      updateXbt(XBT_HOVER_HOLD);
+      helicopter.vx = 5.1;
+      updateXbt(FIXED_DT);
+      result.xbtAbort = !xbtProbe && xbtAbortReason.indexOf("SPEED") >= 0;
+      for (let i = 0; i < 2; i++) {
+        helicopter.vx = 0;
+        setAirborne(xbtTargetX(), waterSurfaceAt(xbtTargetX()) + 10, 0.55);
+        updateXbt(XBT_HOVER_HOLD);
+        updateXbt(XBT_CAST_DURATION);
+      }
+      result.xbtThreeCasts = xbtCasts === XBT_CASTS_REQUIRED;
+      helicopter.x = shipCentreX();
+      settleLanding(shipDeckSurface());
+      result.xbtComplete = gameState === "levelComplete";
+
       startLevel(0, true);
       simulateFrames(20);
       result.nonMedicalDeckStatic = shipSwellOffset() === 0 &&
@@ -3077,6 +3330,11 @@
         result.summitEngineersRecovered &&
         result.summitComplete &&
         result.summitLevelSkip &&
+        result.xbtAutoLaunch &&
+        result.xbtFirstCast &&
+        result.xbtAbort &&
+        result.xbtThreeCasts &&
+        result.xbtComplete &&
         result.nonMedicalDeckStatic;
 
       resetGame(false);
