@@ -124,6 +124,19 @@
     const SPOTLIGHT_RANGE = 250;
     const SPOTLIGHT_HALF_ANGLE = 13 * Math.PI / 180;
     const RESCUE_SPOTLIGHT_TIME = 2;
+    const DART_SPEED = 110;
+    const DART_GRAVITY = 9.81;
+    const DART_RANGE = 250;
+    const DART_COOLDOWN = 0.75;
+    const TRACKING_DARTS_TOTAL = 8;
+    const TRACKING_TRANSITION_TIME = 0.8;
+    const TRACKING_TAG_DIVE_TIME = 2.2;
+    const TRACKING_TAG_VISIBLE_TIME = 6;
+    const TRACKING_RIFLE_SHOULDER = { x: 0, y: -0.35 };
+    const TRACKING_RIFLE_LENGTH = 2.5;
+    const UFO_INTERVAL_MS = 15 * 60 * 1000;
+    const UFO_FLYBY_DURATION = 9;
+    const UFO_VISUAL_WIDTH = 96;
     const SUMMIT_LEDGE = { x1: 774, x2: 802, y: 126, name: "ENGINEER LEDGE" };
     const SUMMIT_PEAK = { x1: 871, x2: 883, y: 188, name: "RADIO SUMMIT" };
     const SUMMIT_MOUNTAIN_POINTS = [
@@ -191,6 +204,30 @@
       y: RESCUE_CLEARING_Y,
       name: "SEARCH CLEARING",
     };
+    const TRACKING_SPECIES = [
+      {
+        id: "whale", label: "WHALE", startX: 520, minX: 430, maxX: 710,
+        speed: 5, submergedTime: 8, surfacedTime: 3.5, depth: 8,
+        surfaceOffset: 0.35, hitRadiusX: 9.5, hitRadiusY: 2.6, approachDistance: 60,
+      },
+      {
+        id: "seal", label: "SEAL", startX: 850, minX: 745, maxX: 1010,
+        speed: 7, submergedTime: 6.5, surfacedTime: 3, depth: 5,
+        surfaceOffset: 0.4, hitRadiusX: 4.8, hitRadiusY: 1.8, approachDistance: 45,
+      },
+      {
+        id: "penguin", label: "PENGUIN", startX: 1040, minX: 1000, maxX: 1380,
+        speed: 12, submergedTime: 12, surfacedTime: 2.75, depth: 3.5,
+        surfaceOffset: 3, hitRadiusX: 2.2, hitRadiusY: 2.4, approachDistance: 35,
+      },
+    ];
+    const TRACKING_ICE_FLOES = [
+      { x: 325, width: 32, height: 1.5, drift: 1.6, phase: 0.2 },
+      { x: 675, width: 20, height: 1.1, drift: -1.2, phase: 1.8 },
+      { x: 1040, width: 39, height: 1.8, drift: 1.1, phase: 3.2, penguinFloe: true },
+      { x: 1190, width: 30, height: 1.3, drift: -0.7, phase: 4.6, penguinFloe: true },
+      { x: 1340, width: 24, height: 1.2, drift: -1.5, phase: 5.4, penguinFloe: true },
+    ];
 
     const LEVELS = [
       {
@@ -249,6 +286,15 @@
         worldMaxX: 2500,
         brief: "Nuyina is underway in open ocean. Hold a precise hover 50 m astern, complete three expendable bathythermograph casts, then land on the heaving deck.",
       },
+      {
+        number: 8,
+        name: "Wildlife Tracking Patrol",
+        mission: "tracking",
+        station: false,
+        openOcean: true,
+        worldMaxX: 1550,
+        brief: "Launch from Nuyina with eight tracking darts and tag a whale, a seal, then a penguin. Fire only while each animal is at the surface, then return to the ship.",
+      },
     ];
 
     const input = {
@@ -286,9 +332,10 @@
     let engineersDropped = false;
     let engineersAboard = true;
     let antennaInstalled = false;
-    // Unit vector in world space; it holds the spotlight bearing between mouse moves.
+    // Unit vector in world space; it holds the spotlight or dart bearing between pointer moves.
     let spotlightAimX = 1;
     let spotlightAimY = -0.15;
+    let pointerAimDistance = 120;
     let passengersAboard = 0;
     let deliveries = 0;
     let deliveredPallets = [];
@@ -315,6 +362,15 @@
     let xbtAbortReason = "";
     let xbtSiteX = null;
     let xbtFallingProbe = null;
+    let trackingTagged = 0;
+    let trackingAnimal = null;
+    let trackingDart = null;
+    let trackingDartCooldown = 0;
+    let trackingDartsRemaining = TRACKING_DARTS_TOTAL;
+    let trackingSplashes = [];
+    let trackingDepartingAnimals = [];
+    let ufoFlyby = null;
+    let lastUfoQuarter = Math.floor(Date.now() / UFO_INTERVAL_MS);
 
     const snow = [];
     const washParticles = [];
@@ -330,6 +386,49 @@
 
     function clamp(value, min, max) {
       return Math.max(min, Math.min(max, value));
+    }
+
+    function triggerUfoFlyby(direction) {
+      if (gameState !== "playing") return false;
+      const helicopterScreenY = worldToScreenY(helicopter.y);
+      const upperLimit = Math.max(42, Math.min(viewHeight - 56, helicopterScreenY - 38));
+      ufoFlyby = {
+        elapsed: 0,
+        direction: direction === -1 ? -1 : direction === 1 ? 1 :
+          (Math.floor(Date.now() / UFO_INTERVAL_MS) % 2 === 0 ? 1 : -1),
+        y: clamp(helicopterScreenY - 105, 42, upperLimit),
+      };
+      return true;
+    }
+
+    function updateUfoFlyby(dt, nowMs) {
+      const wallTime = Number.isFinite(nowMs) ? nowMs : Date.now();
+      const quarter = Math.floor(wallTime / UFO_INTERVAL_MS);
+      if (quarter !== lastUfoQuarter) {
+        if (quarter > lastUfoQuarter && gameState === "playing") {
+          triggerUfoFlyby(quarter % 2 === 0 ? 1 : -1);
+        }
+        lastUfoQuarter = quarter;
+      }
+      if (!ufoFlyby) return;
+      ufoFlyby.elapsed += dt;
+      if (ufoFlyby.elapsed >= UFO_FLYBY_DURATION) ufoFlyby = null;
+    }
+
+    function ufoScreenPosition() {
+      if (!ufoFlyby) return null;
+      const progress = clamp(ufoFlyby.elapsed / UFO_FLYBY_DURATION, 0, 1);
+      const startX = ufoFlyby.direction > 0 ? -UFO_VISUAL_WIDTH : viewWidth + UFO_VISUAL_WIDTH;
+      const endX = ufoFlyby.direction > 0 ? viewWidth + UFO_VISUAL_WIDTH : -UFO_VISUAL_WIDTH;
+      return {
+        x: startX + (endX - startX) * progress,
+        y: ufoFlyby.y + Math.sin(ufoFlyby.elapsed * 1.7) * 2.5,
+      };
+    }
+
+    function ufoLightBrightness(index) {
+      if (!ufoFlyby) return 0;
+      return 0.18 + 0.82 * (0.5 + 0.5 * Math.sin(ufoFlyby.elapsed * 3.4 + index * 0.72));
     }
 
     function barometricPressureRatio(altitude) {
@@ -361,8 +460,17 @@
       return a + (b - a) * amount;
     }
 
+    function isOpenOceanMission() {
+      return !!level && (level.mission === "xbt" || level.openOcean);
+    }
+
     function waterSurfaceAt(x) {
-      if (!level || level.mission !== "xbt") return 0;
+      if (!isOpenOceanMission()) return 0;
+      if (level.mission === "tracking") {
+        const calmTravel = x - elapsed * 1.8;
+        return 0.35 * Math.sin(Math.PI * 2 * calmTravel / 120) +
+          0.12 * Math.sin(Math.PI * 2 * calmTravel / 48 + 0.9);
+      }
       const travel = x - elapsed * 4.8;
       return 2.5 * Math.sin(Math.PI * 2 * travel / 92) +
         0.7 * Math.sin(Math.PI * 2 * travel / 43 + 0.9) +
@@ -380,7 +488,8 @@
 }
 
     function shipSwellOffset() {
-      if (!level || level.mission === "xbt") return level && level.mission === "xbt" ? waterSurfaceAt(shipCentreX()) : 0;
+      if (!level) return 0;
+      if (isOpenOceanMission()) return waterSurfaceAt(shipCentreX());
       if (level.mission !== "medical") return 0;
       return SHIP_SWELL_AMPLITUDE * Math.sin(Math.PI * 2 * elapsed / SHIP_SWELL_PERIOD);
     }
@@ -390,13 +499,20 @@
     }
 
     function shipDeckVelocity() {
-      if (!level || (level.mission !== "medical" && level.mission !== "xbt")) return 0;
-      if (level.mission === "xbt") {
+      if (!level || (level.mission !== "medical" && !isOpenOceanMission())) return 0;
+      if (isOpenOceanMission()) {
+        if (level.mission === "tracking") {
+          const calmTravel = shipCentreX() - elapsed * 1.8;
+          const calmSlope = 0.35 * Math.PI * 2 / 120 * Math.cos(Math.PI * 2 * calmTravel / 120) +
+            0.12 * Math.PI * 2 / 48 * Math.cos(Math.PI * 2 * calmTravel / 48 + 0.9);
+          return calmSlope * -1.8;
+        }
         const travel = shipCentreX() - elapsed * 4.8;
         const slope = 2.5 * Math.PI * 2 / 92 * Math.cos(Math.PI * 2 * travel / 92) +
           0.7 * Math.PI * 2 / 43 * Math.cos(Math.PI * 2 * travel / 43 + 0.9) +
           5 * Math.PI * 2 / 265 * Math.cos(Math.PI * 2 * travel / 265 + 1.7);
-        return slope * (-XBT_SHIP_SPEED - 4.8);
+        const shipSpeed = level.mission === "xbt" ? -XBT_SHIP_SPEED : 0;
+        return slope * (shipSpeed - 4.8);
       }
       return SHIP_SWELL_AMPLITUDE * Math.PI * 2 / SHIP_SWELL_PERIOD *
         Math.cos(Math.PI * 2 * elapsed / SHIP_SWELL_PERIOD);
@@ -506,6 +622,23 @@
       };
     }
 
+    function spawnTrackingAnimal(index) {
+      const species = TRACKING_SPECIES[index];
+      trackingAnimal = species ? {
+        species,
+        x: species.startX,
+        direction: index % 2 === 0 ? 1 : -1,
+        phase: "submerged", // submerged | rising | surfaced | diving
+        phaseTime: 0,
+      } : null;
+      if (trackingAnimal && species.id === "penguin") {
+        const floes = penguinTrackingFloes();
+        trackingAnimal.x = trackingFloePosition(floes[0]).x;
+        trackingAnimal.floeIndex = 1;
+        trackingAnimal.direction = 1;
+      }
+    }
+
     function resetLevel(nextState) {
       elapsed = 0;
       resetAircraft();
@@ -525,6 +658,7 @@
       antennaInstalled = false;
       spotlightAimX = 1;
       spotlightAimY = -0.15;
+      pointerAimDistance = 120;
       passengersAboard = level.mission === "passengers" ? 6 : 0;
       deliveries = 0;
       deliveredPallets = [];
@@ -537,9 +671,17 @@
       xbtAbortReason = "";
       xbtSiteX = null;
       xbtFallingProbe = null;
+      trackingTagged = 0;
+      trackingAnimal = null;
+      trackingDart = null;
+      trackingDartCooldown = 0;
+      trackingDartsRemaining = TRACKING_DARTS_TOTAL;
+      trackingSplashes = [];
+      trackingDepartingAnimals = [];
       missionNotice = "";
       missionNoticeTimer = 0;
       if (usesSlingLoad()) spawnPallet();
+      if (level.mission === "tracking") spawnTrackingAnimal(0);
       washParticles.length = 0;
       clearInput();
       gameState = nextState || "briefing";
@@ -799,6 +941,9 @@
           completeLevel();
         }
       } else if (level.mission === "xbt" && surface.kind === "shipHelipad" && xbtCasts >= XBT_CASTS_REQUIRED) {
+        completeLevel();
+      } else if (level.mission === "tracking" && surface.kind === "shipHelipad" &&
+          trackingTagged >= TRACKING_SPECIES.length) {
         completeLevel();
       }
     }
@@ -1092,6 +1237,283 @@
         Math.hypot(helicopter.vx, helicopter.vy) <= 3;
     }
 
+    function trackingFloePosition(floe) {
+      const x = floe.x + Math.sin(elapsed * 0.18 + floe.phase) * 12 + elapsed * floe.drift * 0.25;
+      const waterY = waterSurfaceAt(x);
+      return { x, waterY, topY: waterY + floe.height * 1.25 };
+    }
+
+    function penguinTrackingFloes() {
+      return TRACKING_ICE_FLOES.filter(floe => floe.penguinFloe);
+    }
+
+    function penguinTrackingFloe(animal) {
+      const floes = penguinTrackingFloes();
+      const index = animal && Number.isInteger(animal.floeIndex) ? animal.floeIndex : 0;
+      return floes[index % floes.length];
+    }
+
+    function trackingAnimalPosition(animal) {
+      if (!animal) return null;
+      const species = animal.species;
+      let positionX = animal.x;
+      let relativeY = -species.depth;
+      if (species.id === "penguin" &&
+          (animal.phase === "rising" || animal.phase === "surfaced" ||
+            (animal.phase === "diving" && !animal.spooked))) {
+        const floePosition = trackingFloePosition(penguinTrackingFloe(animal));
+        if (animal.phase === "rising") {
+          const hopProgress = clamp(animal.phaseTime / TRACKING_TRANSITION_TIME, 0, 1);
+          positionX = lerp(animal.riseStartX === undefined ? animal.x : animal.riseStartX, floePosition.x, hopProgress);
+        } else {
+          positionX = floePosition.x;
+        }
+      }
+      if (animal.phase === "rising") {
+        const riseProgress = clamp(animal.phaseTime / TRACKING_TRANSITION_TIME, 0, 1);
+        relativeY = lerp(
+          -species.depth,
+          species.surfaceOffset,
+          riseProgress
+        );
+        if (species.id === "penguin") relativeY += Math.sin(riseProgress * Math.PI) * 1.5;
+      } else if (animal.phase === "surfaced") {
+        relativeY = species.surfaceOffset;
+      } else if (animal.phase === "diving") {
+        relativeY = lerp(
+          animal.diveStartRelativeY === undefined ? species.surfaceOffset : animal.diveStartRelativeY,
+          -species.depth,
+          clamp(animal.phaseTime / TRACKING_TRANSITION_TIME, 0, 1)
+        );
+      } else if (animal.phase === "taggedDiving") {
+        const diveProgress = clamp(animal.phaseTime / TRACKING_TAG_DIVE_TIME, 0, 1);
+        const easedDive = diveProgress * diveProgress * (3 - 2 * diveProgress);
+        relativeY = lerp(animal.tagStartRelativeY, -species.depth - 7, easedDive);
+      } else if (animal.phase === "taggedSwimming") {
+        relativeY = -species.depth - 7 - Math.min(4, (animal.departureTime - TRACKING_TAG_DIVE_TIME) * 0.8);
+      }
+      return { x: positionX, y: waterSurfaceAt(positionX) + relativeY };
+    }
+
+    function addTrackingSplash(x, kind) {
+      trackingSplashes.push({ x, kind, age: 0, duration: kind === "dart" ? 1 : 1.35 });
+    }
+
+    function advanceTrackingAnimalPhase() {
+      if (!trackingAnimal) return;
+      if (trackingAnimal.phase === "submerged") {
+        if (trackingAnimal.species.id === "penguin") trackingAnimal.riseStartX = trackingAnimal.x;
+        trackingAnimal.phase = "rising";
+      } else if (trackingAnimal.phase === "rising") {
+        trackingAnimal.phase = "surfaced";
+        addTrackingSplash(trackingAnimalPosition(trackingAnimal).x, "surface");
+      } else if (trackingAnimal.phase === "surfaced") {
+        const diveStart = trackingAnimalPosition(trackingAnimal);
+        trackingAnimal.diveStartRelativeY = diveStart.y - waterSurfaceAt(diveStart.x);
+        trackingAnimal.phase = "diving";
+      } else {
+        trackingAnimal.phase = "submerged";
+        if (trackingAnimal.species.id === "penguin") {
+          const floes = penguinTrackingFloes();
+          if (!trackingAnimal.spooked) {
+            trackingAnimal.x = trackingFloePosition(penguinTrackingFloe(trackingAnimal)).x;
+          }
+          trackingAnimal.floeIndex = (trackingAnimal.floeIndex + 1) % floes.length;
+          const nextFloeX = trackingFloePosition(penguinTrackingFloe(trackingAnimal)).x;
+          trackingAnimal.direction = nextFloeX >= trackingAnimal.x ? 1 : -1;
+          delete trackingAnimal.riseStartX;
+        }
+        delete trackingAnimal.diveStartRelativeY;
+        delete trackingAnimal.spooked;
+        addTrackingSplash(trackingAnimal.x, "dive");
+      }
+    }
+
+    function trackingPhaseDuration(animal) {
+      if (!animal) return Infinity;
+      if (animal.phase === "submerged") return animal.species.submergedTime;
+      if (animal.phase === "surfaced") return animal.species.surfacedTime;
+      return TRACKING_TRANSITION_TIME;
+    }
+
+    function segmentHitsSurfacedAnimal(x1, y1, x2, y2) {
+      if (!trackingAnimal || trackingAnimal.phase !== "surfaced") return false;
+      const position = trackingAnimalPosition(trackingAnimal);
+      const radiusX = trackingAnimal.species.hitRadiusX;
+      const radiusY = trackingAnimal.species.hitRadiusY;
+      const ax = (x1 - position.x) / radiusX;
+      const ay = (y1 - position.y) / radiusY;
+      const bx = (x2 - position.x) / radiusX;
+      const by = (y2 - position.y) / radiusY;
+      const dx = bx - ax;
+      const dy = by - ay;
+      const lengthSquared = dx * dx + dy * dy;
+      const t = lengthSquared > 0 ? clamp(-(ax * dx + ay * dy) / lengthSquared, 0, 1) : 0;
+      const closestX = ax + dx * t;
+      const closestY = ay + dy * t;
+      return closestX * closestX + closestY * closestY <= 1;
+    }
+
+    function trackingAnimalDistance() {
+      if (!trackingAnimal) return Infinity;
+      const position = trackingAnimalPosition(trackingAnimal);
+      return Math.hypot(position.x - helicopter.x, position.y - helicopter.y);
+    }
+
+    function spookTrackingAnimalIfTooClose() {
+      if (!trackingAnimal ||
+          (trackingAnimal.phase !== "rising" && trackingAnimal.phase !== "surfaced") ||
+          trackingAnimalDistance() >= trackingAnimal.species.approachDistance) return false;
+      const position = trackingAnimalPosition(trackingAnimal);
+      trackingAnimal.x = position.x;
+      trackingAnimal.diveStartRelativeY = position.y - waterSurfaceAt(position.x);
+      trackingAnimal.spooked = true;
+      trackingAnimal.phase = "diving";
+      trackingAnimal.phaseTime = 0;
+      addTrackingSplash(position.x, "dive");
+      setMissionNotice(trackingAnimal.species.label + " SPOOKED — BACK OFF AND WAIT");
+      return true;
+    }
+
+    function tagTrackingAnimal() {
+      if (!trackingAnimal || trackingAnimal.phase !== "surfaced") return;
+      const taggedPosition = trackingAnimalPosition(trackingAnimal);
+      const taggedSpecies = trackingAnimal.species;
+      addTrackingSplash(taggedPosition.x, "tag");
+      trackingAnimal.x = taggedPosition.x;
+      trackingAnimal.tagStartRelativeY = taggedPosition.y - waterSurfaceAt(taggedPosition.x);
+      trackingAnimal.tagged = true;
+      trackingAnimal.phase = "taggedDiving";
+      trackingAnimal.phaseTime = 0;
+      trackingAnimal.departureTime = 0;
+      trackingDepartingAnimals.push(trackingAnimal);
+      trackingTagged++;
+      trackingDart = null;
+      trackingAnimal = null;
+      if (trackingTagged < TRACKING_SPECIES.length) {
+        const nextSpecies = TRACKING_SPECIES[trackingTagged];
+        setMissionNotice(taggedSpecies.label + " TAGGED — TRACK THE " + nextSpecies.label);
+        spawnTrackingAnimal(trackingTagged);
+      } else {
+        setMissionNotice("ALL ANIMALS TAGGED — RETURN TO NUYINA");
+      }
+      if (trackingDartsRemaining <= 0 && trackingTagged < TRACKING_SPECIES.length) {
+        crash("Tracking darts depleted — restart the mission and make each shot count.");
+      }
+    }
+
+    function trackingRifleShoulderWorld() {
+      return helicopterPoint(
+        TRACKING_RIFLE_SHOULDER.x,
+        TRACKING_RIFLE_SHOULDER.y,
+        helicopterPose()
+      );
+    }
+
+    function trackingRifleMuzzleWorld() {
+      const shoulder = trackingRifleShoulderWorld();
+      return {
+        x: shoulder.x + spotlightAimX * TRACKING_RIFLE_LENGTH,
+        y: shoulder.y + spotlightAimY * TRACKING_RIFLE_LENGTH,
+      };
+    }
+
+    function fireTrackingDart() {
+      if (gameState !== "playing" || level.mission !== "tracking" ||
+          trackingTagged >= TRACKING_SPECIES.length || trackingDart || trackingDartCooldown > 0 ||
+          trackingDartsRemaining <= 0) return false;
+      const muzzle = trackingRifleMuzzleWorld();
+      const originX = muzzle.x;
+      const originY = muzzle.y;
+      trackingDart = {
+        x: originX,
+        y: originY,
+        previousX: originX,
+        previousY: originY,
+        vx: spotlightAimX * DART_SPEED,
+        vy: spotlightAimY * DART_SPEED,
+        travelled: 0,
+      };
+      trackingDartsRemaining--;
+      trackingDartCooldown = DART_COOLDOWN;
+      return true;
+    }
+
+    function finishTrackingDartMiss() {
+      trackingDart = null;
+      if (trackingDartsRemaining <= 0 && trackingTagged < TRACKING_SPECIES.length) {
+        crash("Tracking darts depleted — restart the mission and make each shot count.");
+      }
+    }
+
+    function updateTrackingDart(dt) {
+      trackingDartCooldown = Math.max(0, trackingDartCooldown - dt);
+      if (!trackingDart) return;
+      const dart = trackingDart;
+      dart.previousX = dart.x;
+      dart.previousY = dart.y;
+      dart.vy -= DART_GRAVITY * dt;
+      const distance = Math.hypot(dart.vx, dart.vy) * dt;
+      dart.x += dart.vx * dt;
+      dart.y += dart.vy * dt;
+      dart.travelled += distance;
+
+      if (segmentHitsSurfacedAnimal(dart.previousX, dart.previousY, dart.x, dart.y)) {
+        tagTrackingAnimal();
+        return;
+      }
+
+      const previousSurface = waterSurfaceAt(dart.previousX);
+      const currentSurface = waterSurfaceAt(dart.x);
+      if (dart.previousY > previousSurface && dart.y <= currentSurface) {
+        addTrackingSplash(dart.x, "dart");
+        finishTrackingDartMiss();
+        return;
+      }
+      if (dart.travelled >= DART_RANGE) finishTrackingDartMiss();
+    }
+
+    function updateTracking(dt) {
+      for (let i = trackingSplashes.length - 1; i >= 0; i--) {
+        trackingSplashes[i].age += dt;
+        if (trackingSplashes[i].age >= trackingSplashes[i].duration) trackingSplashes.splice(i, 1);
+      }
+      for (let i = trackingDepartingAnimals.length - 1; i >= 0; i--) {
+        const animal = trackingDepartingAnimals[i];
+        animal.departureTime += dt;
+        animal.phaseTime += dt;
+        animal.x += animal.direction * animal.species.speed * 1.7 * dt;
+        if (animal.phase === "taggedDiving" && animal.phaseTime >= TRACKING_TAG_DIVE_TIME) {
+          animal.phase = "taggedSwimming";
+        }
+        if (animal.departureTime >= TRACKING_TAG_VISIBLE_TIME) trackingDepartingAnimals.splice(i, 1);
+      }
+      if (trackingAnimal) {
+        const species = trackingAnimal.species;
+        if (species.id === "penguin" && trackingAnimal.phase === "submerged") {
+          const targetFloeX = trackingFloePosition(penguinTrackingFloe(trackingAnimal)).x;
+          const distanceToFloe = targetFloeX - trackingAnimal.x;
+          trackingAnimal.direction = distanceToFloe >= 0 ? 1 : -1;
+          const swimDistance = Math.min(Math.abs(distanceToFloe), species.speed * dt);
+          trackingAnimal.x += trackingAnimal.direction * swimDistance;
+        } else if (species.id !== "penguin") {
+          trackingAnimal.x += trackingAnimal.direction * species.speed * dt;
+          if (trackingAnimal.x <= species.minX || trackingAnimal.x >= species.maxX) {
+            trackingAnimal.x = clamp(trackingAnimal.x, species.minX, species.maxX);
+            trackingAnimal.direction *= -1;
+          }
+        }
+        trackingAnimal.phaseTime += dt;
+        while (trackingAnimal && trackingAnimal.phaseTime >= trackingPhaseDuration(trackingAnimal)) {
+          const completedDuration = trackingPhaseDuration(trackingAnimal);
+          trackingAnimal.phaseTime -= completedDuration;
+          advanceTrackingAnimalPhase();
+        }
+        spookTrackingAnimalIfTooClose();
+      }
+      updateTrackingDart(dt);
+    }
+
     function xbtTargetX() {
       if (xbtSiteX !== null) return xbtSiteX;
       // Nuyina's bow faces left, so its stern is the right-hand end of the
@@ -1183,9 +1605,11 @@
         }
       }
       if (level.mission === "xbt") updateXbt(dt);
+      if (level.mission === "tracking") updateTracking(dt);
     }
 
     function stepPhysics(dt) {
+      updateUfoFlyby(dt);
       if (gameState !== "playing") return;
 
       const previousPose = helicopterPose();
@@ -1340,20 +1764,37 @@
       return (viewHeight * 0.46 - y) / PIXELS_PER_METRE + cameraY;
     }
 
-    function aimSpotlightAt(worldX, worldY) {
-      const aimX = worldX - helicopter.x;
-      const aimY = worldY - (helicopter.y - 1);
+    function aimPointerAt(worldX, worldY) {
+      const origin = level.mission === "tracking" ?
+        trackingRifleShoulderWorld() : { x: helicopter.x, y: helicopter.y - 1 };
+      const aimX = worldX - origin.x;
+      const aimY = worldY - origin.y;
       const aimLength = Math.hypot(aimX, aimY);
       if (aimLength < 0.01) return;
       spotlightAimX = aimX / aimLength;
       spotlightAimY = aimY / aimLength;
+      pointerAimDistance = clamp(aimLength, 15, DART_RANGE);
     }
 
-    function aimSpotlight(event) {
+    // Retained for the Level 4 checks and for callers that aim directly in world space.
+    function aimSpotlightAt(worldX, worldY) {
+      aimPointerAt(worldX, worldY);
+    }
+
+    function aimPointer(event) {
       const rect = canvas.getBoundingClientRect();
       const screenX = (event.clientX - rect.left) * viewWidth / rect.width;
       const screenY = (event.clientY - rect.top) * viewHeight / rect.height;
-      aimSpotlightAt(screenToWorldX(screenX), screenToWorldY(screenY));
+      aimPointerAt(screenToWorldX(screenX), screenToWorldY(screenY));
+    }
+
+    function handlePointerDown(event) {
+      if (event.button !== undefined && event.button !== 0) return;
+      aimPointer(event);
+      if (level.mission === "tracking" && gameState === "playing") {
+        event.preventDefault();
+        fireTrackingDart();
+      }
     }
 
     function isRescueSpotlightOnPerson() {
@@ -1400,7 +1841,7 @@
     }
 
     function drawMountains() {
-      if (level && level.mission === "xbt") return;
+      if (isOpenOceanMission()) return;
       const seaY = worldToScreenY(0);
       const offset = -((cameraX * 0.13) % 720);
       ctx.fillStyle = "#6d8d9b";
@@ -1887,6 +2328,362 @@
       ctx.fillStyle = "#c8eced"; ctx.font = "11px Trebuchet MS"; ctx.fillText("DEPTH " + depth.toFixed(0) + " m", x + 12, y + h - 10);
     }
 
+    function drawSurfaceIce() {
+      if (level.mission !== "tracking") return;
+      for (const floe of TRACKING_ICE_FLOES) {
+        const floePosition = trackingFloePosition(floe);
+        const worldX = floePosition.x;
+        const x = worldToScreenX(worldX);
+        const y = worldToScreenY(floePosition.waterY);
+        const width = floe.width * PIXELS_PER_METRE;
+        const height = floe.height * PIXELS_PER_METRE;
+        if (x + width < -30 || x - width > viewWidth + 30) continue;
+
+        ctx.fillStyle = "rgba(83,151,173,0.58)";
+        ctx.beginPath();
+        ctx.moveTo(x - width * 0.42, y + 2);
+        ctx.lineTo(x - width * 0.25, y + height * 2.7);
+        ctx.lineTo(x + width * 0.28, y + height * 2.1);
+        ctx.lineTo(x + width * 0.44, y + 1);
+        ctx.closePath();
+        ctx.fill();
+
+        const gradient = ctx.createLinearGradient(0, y - height * 1.5, 0, y + 2);
+        gradient.addColorStop(0, "#f7ffff");
+        gradient.addColorStop(1, "#b8d8dc");
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.moveTo(x - width * 0.5, y);
+        ctx.lineTo(x - width * 0.34, y - height * 0.9);
+        ctx.lineTo(x - width * 0.08, y - height * 1.25);
+        ctx.lineTo(x + width * 0.18, y - height * 0.7);
+        ctx.lineTo(x + width * 0.5, y - height * 0.18);
+        ctx.lineTo(x + width * 0.31, y + 1);
+        ctx.lineTo(x - width * 0.25, y + 2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = "rgba(245,255,255,0.88)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+
+    function drawWhale(surfaced) {
+      ctx.fillStyle = surfaced ? "#526b78" : "#8db8c5";
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 9, 2.25, -0.04, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = surfaced ? "#93aab1" : "#a8cad2";
+      ctx.beginPath();
+      ctx.ellipse(1.4, 0.65, 6.2, 1.35, 0, 0, Math.PI);
+      ctx.fill();
+      ctx.fillStyle = surfaced ? "#405762" : "#79a8b6";
+      ctx.beginPath();
+      ctx.moveTo(-8.2, 0);
+      ctx.lineTo(-12, -2.7);
+      ctx.lineTo(-10.5, 0.1);
+      ctx.lineTo(-12.2, 2.4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-1.5, -1.8);
+      ctx.lineTo(-3.3, -4.2);
+      ctx.lineTo(0.2, -2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(1.5, 1.2);
+      ctx.lineTo(-0.2, 4);
+      ctx.lineTo(3.8, 1.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#142b35";
+      ctx.beginPath();
+      ctx.arc(6.4, -0.65, 0.22, 0, Math.PI * 2);
+      ctx.fill();
+      if (surfaced) {
+        ctx.strokeStyle = "rgba(224,249,255,0.85)";
+        ctx.lineWidth = 0.35;
+        ctx.beginPath();
+        ctx.moveTo(5.2, -1.8);
+        ctx.quadraticCurveTo(5.8, -5.2, 4.3, -7.1);
+        ctx.moveTo(5.2, -1.8);
+        ctx.quadraticCurveTo(6.6, -5.3, 8, -6.5);
+        ctx.stroke();
+      }
+    }
+
+    function drawSeal(surfaced) {
+      ctx.fillStyle = surfaced ? "#596b70" : "#9abcc3";
+      ctx.beginPath();
+      ctx.ellipse(-0.4, 0.2, 4.1, 1.35, -0.08, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(3.3, -0.45, 1.25, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-3.8, 0.2);
+      ctx.lineTo(-6.1, -1.5);
+      ctx.lineTo(-5.1, 0.1);
+      ctx.lineTo(-6, 1.6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = surfaced ? "#43565b" : "#82abb4";
+      ctx.beginPath();
+      ctx.moveTo(0.1, 0.8);
+      ctx.lineTo(-1.6, 3);
+      ctx.lineTo(1.8, 1.2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#122a32";
+      ctx.beginPath();
+      ctx.arc(3.75, -0.75, 0.18, 0, Math.PI * 2);
+      ctx.fill();
+      if (surfaced) {
+        ctx.strokeStyle = "rgba(229,241,239,0.8)";
+        ctx.lineWidth = 0.18;
+        ctx.beginPath();
+        ctx.moveTo(4.2, -0.2); ctx.lineTo(5.6, -0.8);
+        ctx.moveTo(4.2, 0); ctx.lineTo(5.7, 0.1);
+        ctx.stroke();
+      }
+    }
+
+    function drawPenguin(surfaced) {
+      if (surfaced) {
+        ctx.fillStyle = "#172b34";
+        ctx.beginPath();
+        ctx.ellipse(0, -0.55, 1.25, 2.25, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#ecf5ee";
+        ctx.beginPath();
+        ctx.ellipse(0.38, -0.2, 0.72, 1.5, -0.12, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#efb642";
+        ctx.beginPath();
+        ctx.moveTo(1, -1.55); ctx.lineTo(2.1, -1.15); ctx.lineTo(1, -0.9); ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = "#172b34";
+        ctx.beginPath();
+        ctx.moveTo(-0.75, -0.6); ctx.lineTo(-2.1, 0.55); ctx.lineTo(-0.9, 0.25); ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.beginPath(); ctx.arc(0.55, -1.75, 0.14, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#102127";
+        ctx.beginPath(); ctx.arc(0.58, -1.75, 0.07, 0, Math.PI * 2); ctx.fill();
+        return;
+      }
+      ctx.fillStyle = "#1d3944";
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 2.2, 0.95, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#dbe8e4";
+      ctx.beginPath();
+      ctx.ellipse(0.45, 0.28, 1.25, 0.48, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#efb642";
+      ctx.beginPath();
+      ctx.moveTo(2, -0.25); ctx.lineTo(3.15, 0); ctx.lineTo(2, 0.28); ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#18313b";
+      ctx.beginPath();
+      ctx.moveTo(-0.4, -0.5); ctx.lineTo(-1.5, -2); ctx.lineTo(0.7, -0.7); ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawTrackingTag(animal) {
+      if (!animal.tagged) return;
+      const marker = animal.species.id === "whale" ? { x: 0.8, y: -2.05 } :
+        animal.species.id === "seal" ? { x: 0.2, y: -1.25 } : { x: -0.15, y: -1.05 };
+      ctx.save();
+      ctx.translate(marker.x, marker.y);
+      ctx.rotate(-0.15);
+      ctx.fillStyle = "#f4cf45";
+      ctx.fillRect(-0.7, -0.22, 1.4, 0.44);
+      ctx.strokeStyle = "#26383d";
+      ctx.lineWidth = 0.12;
+      ctx.strokeRect(-0.7, -0.22, 1.4, 0.44);
+      const flashOn = Math.floor((elapsed + animal.departureTime) * 5) % 2 === 0;
+      ctx.fillStyle = flashOn ? "#ff2d2d" : "#6e161d";
+      ctx.beginPath();
+      ctx.arc(0.52, -0.3, flashOn ? 0.2 : 0.13, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawOneTrackingAnimal(animal) {
+      const position = trackingAnimalPosition(animal);
+      const justLeftFloe = animal.species.id === "penguin" && animal.phase === "taggedDiving" &&
+        animal.departureTime < 0.25;
+      const penguinHopping = animal.species.id === "penguin" &&
+        ((animal.phase === "rising" && animal.phaseTime > TRACKING_TRANSITION_TIME * 0.55) ||
+          (animal.phase === "diving" && animal.phaseTime < TRACKING_TRANSITION_TIME * 0.35));
+      const surfaced = animal.phase === "surfaced" || justLeftFloe || penguinHopping;
+      const transitioning = animal.phase === "rising" || animal.phase === "diving" ||
+        animal.phase === "taggedDiving";
+      const departureFade = animal.tagged ?
+        clamp(1 - Math.max(0, animal.departureTime - 3.5) / (TRACKING_TAG_VISIBLE_TIME - 3.5), 0, 1) : 1;
+      ctx.save();
+      ctx.translate(worldToScreenX(position.x), worldToScreenY(position.y));
+      ctx.scale(PIXELS_PER_METRE * animal.direction, PIXELS_PER_METRE);
+      ctx.globalAlpha = (surfaced ? 1 : transitioning ? 0.62 : 0.42) * departureFade;
+      if (animal.species.id === "whale") drawWhale(surfaced);
+      else if (animal.species.id === "seal") drawSeal(surfaced);
+      else drawPenguin(surfaced);
+      drawTrackingTag(animal);
+      ctx.restore();
+    }
+
+    function drawTrackingAnimal() {
+      if (level.mission !== "tracking") return;
+      for (const animal of trackingDepartingAnimals) drawOneTrackingAnimal(animal);
+      if (trackingAnimal) drawOneTrackingAnimal(trackingAnimal);
+    }
+
+    function drawTrackingSplashes() {
+      if (level.mission !== "tracking") return;
+      for (const splash of trackingSplashes) {
+        const progress = splash.age / splash.duration;
+        const x = worldToScreenX(splash.x);
+        const y = worldToScreenY(waterSurfaceAt(splash.x));
+        const radius = 7 + progress * (splash.kind === "tag" ? 38 : 26);
+        ctx.globalAlpha = 1 - progress;
+        ctx.strokeStyle = splash.kind === "tag" ? "#ffd65a" : "#dff9ff";
+        ctx.lineWidth = splash.kind === "tag" ? 2.5 : 1.5;
+        ctx.beginPath();
+        ctx.ellipse(x, y, radius, radius * 0.25, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        if (splash.kind !== "dart") {
+          ctx.fillStyle = "#e8fbff";
+          for (let i = 0; i < 5; i++) {
+            const angle = i * 1.7 + splash.x;
+            ctx.beginPath();
+            ctx.arc(x + Math.cos(angle) * radius * 0.55, y - Math.sin(angle) * radius * 0.45,
+              Math.max(0.8, 2.3 * (1 - progress)), 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawTrackingDart() {
+      if (level.mission !== "tracking" || !trackingDart) return;
+      const x = worldToScreenX(trackingDart.x);
+      const y = worldToScreenY(trackingDart.y);
+      const angle = Math.atan2(-trackingDart.vy, trackingDart.vx);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle);
+      ctx.strokeStyle = "#f7e7a8";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-17, 0);
+      ctx.lineTo(3, 0);
+      ctx.stroke();
+      ctx.fillStyle = "#f15a29";
+      ctx.beginPath();
+      ctx.moveTo(6, 0); ctx.lineTo(0, -3); ctx.lineTo(0, 3); ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#57d0bd";
+      ctx.fillRect(-15, -3, 5, 6);
+      ctx.restore();
+    }
+
+    function drawTrackingLaser() {
+      if (level.mission !== "tracking" || gameState !== "playing" ||
+          trackingTagged >= TRACKING_SPECIES.length) return;
+      const muzzle = trackingRifleMuzzleWorld();
+      const shoulder = trackingRifleShoulderWorld();
+      const length = Math.min(pointerAimDistance, DART_RANGE);
+      const targetX = shoulder.x + spotlightAimX * length;
+      const targetY = shoulder.y + spotlightAimY * length;
+      const startX = worldToScreenX(muzzle.x);
+      const startY = worldToScreenY(muzzle.y);
+      const endX = worldToScreenX(targetX);
+      const endY = worldToScreenY(targetY);
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,35,45,0.78)";
+      ctx.shadowColor = "rgba(255,25,35,0.8)";
+      ctx.shadowBlur = 5;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.stroke();
+      ctx.fillStyle = "#ff2636";
+      ctx.beginPath();
+      ctx.arc(endX, endY, 2.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawTrackingReticleAmmo(reticleX, reticleY, colour) {
+      const iconSpacing = 7;
+      const groupWidth = TRACKING_DARTS_TOTAL * iconSpacing - 2;
+      const startX = clamp(reticleX + 18, 5, Math.max(5, viewWidth - groupWidth - 5));
+      const startY = clamp(reticleY - 30, 5, Math.max(5, viewHeight - 15));
+
+      ctx.save();
+      ctx.strokeStyle = colour;
+      ctx.fillStyle = colour;
+      ctx.lineWidth = 1;
+      ctx.lineCap = "round";
+      ctx.shadowColor = colour;
+      ctx.shadowBlur = 2;
+      for (let i = 0; i < trackingDartsRemaining; i++) {
+        const x = startX + i * iconSpacing;
+        ctx.beginPath();
+        ctx.moveTo(x + 2, startY + 10);
+        ctx.lineTo(x + 2, startY + 3);
+        ctx.moveTo(x + 2, startY + 8);
+        ctx.lineTo(x, startY + 11);
+        ctx.moveTo(x + 2, startY + 8);
+        ctx.lineTo(x + 4, startY + 11);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x + 2, startY);
+        ctx.lineTo(x, startY + 4);
+        ctx.lineTo(x + 4, startY + 4);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+      return trackingDartsRemaining;
+    }
+
+    function drawTrackingReticle() {
+      if (level.mission !== "tracking" || gameState !== "playing" ||
+          trackingTagged >= TRACKING_SPECIES.length) return;
+      const shoulder = trackingRifleShoulderWorld();
+      const targetX = shoulder.x + spotlightAimX * pointerAimDistance;
+      const targetY = shoulder.y + spotlightAimY * pointerAimDistance;
+      const x = worldToScreenX(targetX);
+      const y = worldToScreenY(targetY);
+      const ready = trackingDartsRemaining > 0 && trackingDartCooldown <= 0 && !trackingDart;
+      const reticleColour = ready ? "#65e4b0" : "#ffd65a";
+      ctx.save();
+      ctx.strokeStyle = reticleColour;
+      ctx.fillStyle = reticleColour;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, 12, 0, Math.PI * 2);
+      ctx.moveTo(x - 20, y); ctx.lineTo(x - 7, y);
+      ctx.moveTo(x + 7, y); ctx.lineTo(x + 20, y);
+      ctx.moveTo(x, y - 20); ctx.lineTo(x, y - 7);
+      ctx.moveTo(x, y + 7); ctx.lineTo(x, y + 20);
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, 2.2, 0, Math.PI * 2); ctx.fill();
+      ctx.font = "bold 10px Trebuchet MS";
+      ctx.textAlign = "center";
+      ctx.fillText(
+        trackingDartsRemaining <= 0 ? "NO DARTS" : ready ? "DART READY" : "RELOADING",
+        x, y + 34
+      );
+      ctx.restore();
+      drawTrackingReticleAmmo(x, y, reticleColour);
+    }
+
     function drawWash() {
       ctx.lineCap = "round";
       for (const particle of washParticles) {
@@ -1918,6 +2715,95 @@
         6 + height * 0.05,
         0, 0, Math.PI * 2
       );
+      ctx.fill();
+    }
+
+    function trackingRifleLocalAngle() {
+      const screenAimX = spotlightAimX;
+      const screenAimY = -spotlightAimY;
+      const cos = Math.cos(helicopter.angle);
+      const sin = Math.sin(helicopter.angle);
+      const unrotatedX = cos * screenAimX + sin * screenAimY;
+      const unrotatedY = -sin * screenAimX + cos * screenAimY;
+      return Math.atan2(unrotatedY, unrotatedX * helicopter.facing);
+    }
+
+    function drawTrackingRifleOperator() {
+      if (level.mission !== "tracking") return;
+
+      // Open door and seated expeditioner, drawn in the helicopter's local frame.
+      ctx.fillStyle = "#10252d";
+      ctx.beginPath();
+      ctx.roundRect(-1.08, -1.72, 1.82, 2.8, 0.22);
+      ctx.fill();
+      ctx.strokeStyle = "#761321";
+      ctx.lineWidth = 0.12;
+      ctx.stroke();
+
+      ctx.strokeStyle = "#26343a";
+      ctx.lineWidth = 0.28;
+      ctx.beginPath();
+      ctx.moveTo(-0.08, 0.42);
+      ctx.lineTo(0.48, 1.34);
+      ctx.lineTo(1.2, 1.78);
+      ctx.moveTo(-0.62, 0.42);
+      ctx.lineTo(-0.4, 1.48);
+      ctx.lineTo(0.28, 1.98);
+      ctx.stroke();
+
+      ctx.fillStyle = "#ef5b2b";
+      ctx.beginPath();
+      ctx.roundRect(-0.78, -0.72, 1.12, 1.42, 0.24);
+      ctx.fill();
+      ctx.fillStyle = "#f2c7a4";
+      ctx.beginPath();
+      ctx.arc(-0.25, -1.06, 0.38, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#f2c94c";
+      ctx.beginPath();
+      ctx.arc(-0.25, -1.18, 0.42, Math.PI, Math.PI * 2);
+      ctx.lineTo(0.24, -1.12);
+      ctx.lineTo(0.02, -0.98);
+      ctx.fill();
+
+      const shoulder = TRACKING_RIFLE_SHOULDER;
+      const rifleAngle = trackingRifleLocalAngle();
+      ctx.save();
+      ctx.translate(shoulder.x, shoulder.y);
+      ctx.rotate(rifleAngle);
+      ctx.strokeStyle = "#f2c7a4";
+      ctx.lineWidth = 0.24;
+      ctx.beginPath();
+      ctx.moveTo(-0.25, 0.05);
+      ctx.lineTo(0.75, 0.08);
+      ctx.stroke();
+      ctx.strokeStyle = "#202c31";
+      ctx.lineWidth = 0.2;
+      ctx.beginPath();
+      ctx.moveTo(-0.72, 0);
+      ctx.lineTo(TRACKING_RIFLE_LENGTH, 0);
+      ctx.stroke();
+      ctx.fillStyle = "#8d5d38";
+      ctx.beginPath();
+      ctx.moveTo(-0.72, -0.18);
+      ctx.lineTo(0.34, -0.12);
+      ctx.lineTo(0.45, 0.14);
+      ctx.lineTo(-0.6, 0.22);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#1c292e";
+      ctx.fillRect(0.35, -0.12, 2.05, 0.24);
+      ctx.fillStyle = "#d8b348";
+      ctx.fillRect(0.75, 0.1, 0.32, 0.42);
+      ctx.fillStyle = "#ff2c39";
+      ctx.beginPath();
+      ctx.arc(TRACKING_RIFLE_LENGTH, 0, 0.09, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.fillStyle = "#f2c7a4";
+      ctx.beginPath();
+      ctx.arc(shoulder.x, shoulder.y, 0.16, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -2068,6 +2954,7 @@
       ctx.fillStyle = "#1c282d";
       ctx.fillRect(-1.32, 0.1, 0.72, 0.16);
       ctx.fillRect(-1.28, 0.42, 0.68, 0.14);
+      drawTrackingRifleOperator();
       ctx.fillStyle = "#f5efe2";
       ctx.font = "bold 0.62px Arial";
       ctx.textAlign = "center";
@@ -2283,11 +3170,110 @@
       ctx.globalAlpha = 1;
     }
 
+    function drawUfoFlyby() {
+      const position = ufoScreenPosition();
+      if (!position) return false;
+      const endFade = Math.min(ufoFlyby.elapsed, UFO_FLYBY_DURATION - ufoFlyby.elapsed);
+      const fade = clamp(endFade / 0.45, 0, 1);
+
+      ctx.save();
+      ctx.translate(position.x, position.y);
+      ctx.globalAlpha = fade;
+
+      const beam = ctx.createLinearGradient(0, 7, 0, 74);
+      beam.addColorStop(0, "rgba(159,232,255,0.16)");
+      beam.addColorStop(1, "rgba(159,232,255,0)");
+      ctx.fillStyle = beam;
+      ctx.beginPath();
+      ctx.moveTo(-16, 6);
+      ctx.lineTo(16, 6);
+      ctx.lineTo(31, 74);
+      ctx.lineTo(-31, 74);
+      ctx.closePath();
+      ctx.fill();
+
+      // Flat side profile: every hull edge is seen directly from the side.
+      ctx.shadowColor = "rgba(130,225,255,0.58)";
+      ctx.shadowBlur = 7;
+      ctx.fillStyle = "#294b60";
+      ctx.strokeStyle = "rgba(179,235,250,0.76)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-18, -5);
+      ctx.quadraticCurveTo(-13, -16, 0, -17);
+      ctx.quadraticCurveTo(13, -16, 18, -5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#7693a3";
+      ctx.beginPath();
+      ctx.moveTo(-8, -11);
+      ctx.quadraticCurveTo(0, -16, 8, -11);
+      ctx.lineTo(5, -9);
+      ctx.quadraticCurveTo(0, -12, -5, -9);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#173548";
+      ctx.beginPath();
+      ctx.moveTo(-47, 0);
+      ctx.lineTo(-29, -6);
+      ctx.lineTo(29, -6);
+      ctx.lineTo(47, 0);
+      ctx.lineTo(33, 7);
+      ctx.lineTo(-33, 7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#0a202e";
+      ctx.beginPath();
+      ctx.moveTo(-33, 7);
+      ctx.lineTo(33, 7);
+      ctx.lineTo(24, 11);
+      ctx.lineTo(-24, 11);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(179,235,250,0.38)";
+      ctx.beginPath();
+      ctx.moveTo(-29, -3);
+      ctx.lineTo(29, -3);
+      ctx.stroke();
+
+      const lightColours = [
+        "#ff5c75", "#ffca5a", "#6ff5bd", "#69d9ff", "#a98aff",
+        "#ff78ca", "#69d9ff", "#6ff5bd", "#ffca5a", "#ff5c75", "#a98aff",
+      ];
+      for (let i = 0; i < lightColours.length; i++) {
+        const lightX = -33 + i * 6.6;
+        const brightness = ufoLightBrightness(i);
+        ctx.globalAlpha = fade * brightness;
+        ctx.fillStyle = lightColours[i];
+        ctx.shadowColor = lightColours[i];
+        ctx.shadowBlur = 3 + brightness * 6;
+        ctx.beginPath();
+        ctx.arc(lightX, 5, 1.35, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.globalAlpha = fade * 0.8;
+      ctx.fillStyle = "#c8f4ff";
+      ctx.shadowColor = "#b9efff";
+      ctx.shadowBlur = 9;
+      ctx.fillRect(-11, 8, 22, 2);
+      ctx.restore();
+      return true;
+    }
+
     function drawWorld(realDt) {
       drawSky();
       drawMountains();
       drawNuyina();
       drawWater();
+      drawSurfaceIce();
+      drawTrackingSplashes();
+      drawTrackingAnimal();
+      drawTrackingLaser();
+      drawTrackingDart();
       drawIce();
       drawIceberg();
       drawSummitMountain();
@@ -2299,10 +3285,12 @@
       drawRescueExpeditioner();
       updateAndDrawSnow(realDt);
       drawNightVeil();
+      drawUfoFlyby();
       drawSpotlight();
       drawHelicopter();
       drawFlightReadout();
       drawXbtPip();
+      drawTrackingReticle();
     }
 
     function drawRoundedPanel(x, y, width, height, radius, fill) {
@@ -2332,6 +3320,13 @@
         if (xbtCasts >= XBT_CASTS_REQUIRED) return "All XBT casts complete — return to Nuyina and land";
         return xbtProbe ? "Hold position: cast " + (xbtCasts + 1) + " — " + Math.max(0, XBT_CAST_DURATION - xbtProbe.time).toFixed(1) + " s" :
           "Hover 50 m astern at 10 m above the waves — cast " + (xbtCasts + 1) + " / 3";
+      }
+      if (level.mission === "tracking") {
+        if (trackingTagged >= TRACKING_SPECIES.length) return "Return to Nuyina and land";
+        const species = trackingAnimal ? trackingAnimal.species.label.toLowerCase() : "animal";
+        return species === "penguin" ?
+          "Track the penguin and fire when it hops onto the ice floe" :
+          "Track the " + species + " and fire while it is surfaced";
       }
       if (level.mission === "summit") {
         if (!engineersDropped) return "Land on the mountain ledge to deploy two engineers";
@@ -2367,6 +3362,12 @@
         return xbtCasts >= XBT_CASTS_REQUIRED ?
           { x: shipCentreX(), y: shipDeckY() } :
           { x: xbtTargetX(), y: waterSurfaceAt(xbtTargetX()) + 10 };
+      }
+      if (level.mission === "tracking") {
+        if (trackingTagged >= TRACKING_SPECIES.length || !trackingAnimal) {
+          return { x: (SHIP_DECK.x1 + SHIP_DECK.x2) / 2, y: shipDeckY() };
+        }
+        return trackingAnimalPosition(trackingAnimal);
       }
       if (level.mission === "summit") {
         if (!engineersDropped || (antennaInstalled && !engineersAboard)) {
@@ -2439,6 +3440,71 @@
         Math.round(distance) + " m";
     }
 
+    function trackingDartRackBounds() {
+      const width = Math.min(176, viewWidth - 24);
+      const height = 68;
+      const fitsBesideFlightPanel = viewWidth >= 614;
+      return {
+        x: viewWidth - width - 12,
+        y: fitsBesideFlightPanel ? 12 : Math.min(252, Math.max(12, viewHeight - height - 12)),
+        width,
+        height,
+      };
+    }
+
+    function drawTrackingDartRack() {
+      if (level.mission !== "tracking") return 0;
+      const rack = trackingDartRackBounds();
+      drawRoundedPanel(rack.x, rack.y, rack.width, rack.height, 9, "rgba(5,20,29,0.84)");
+
+      ctx.save();
+      ctx.textAlign = "left";
+      ctx.fillStyle = trackingDartsRemaining > 0 ? "#d8edf0" : "#ff8b65";
+      ctx.font = "bold 11px Trebuchet MS";
+      ctx.fillText(
+        "TRACKING DARTS  " + trackingDartsRemaining + " / " + TRACKING_DARTS_TOTAL,
+        rack.x + 12, rack.y + 19
+      );
+
+      const iconLeft = rack.x + 13;
+      const iconWidth = (rack.width - 26) / TRACKING_DARTS_TOTAL;
+      const centreY = rack.y + 47;
+      let drawnDarts = 0;
+      for (let i = 0; i < TRACKING_DARTS_TOTAL; i++) {
+        const x = iconLeft + iconWidth * (i + 0.5);
+        if (i >= trackingDartsRemaining) {
+          ctx.fillStyle = "rgba(220,239,241,0.16)";
+          ctx.fillRect(x - 3.5, centreY + 10, 7, 2);
+          continue;
+        }
+
+        drawnDarts++;
+        ctx.strokeStyle = "#f7e7a8";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x, centreY + 9);
+        ctx.lineTo(x, centreY - 7);
+        ctx.stroke();
+        ctx.fillStyle = "#f15a29";
+        ctx.beginPath();
+        ctx.moveTo(x, centreY - 12);
+        ctx.lineTo(x - 3, centreY - 6);
+        ctx.lineTo(x + 3, centreY - 6);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = "#57d0bd";
+        ctx.beginPath();
+        ctx.moveTo(x, centreY + 5);
+        ctx.lineTo(x - 4, centreY + 10);
+        ctx.lineTo(x, centreY + 8);
+        ctx.lineTo(x + 4, centreY + 10);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+      return drawnDarts;
+    }
+
     function drawHUD() {
       if (gameState !== "playing" && gameState !== "crashed") return;
       const panelWidth = Math.min(390, viewWidth - 24);
@@ -2485,7 +3551,7 @@
 
       const objectiveWidth = Math.min(520, viewWidth - 24);
       const objectiveHeight = level.mission === "summit" ? 108 :
-        level.mission === "xbt" ? 91 :
+        level.mission === "xbt" || level.mission === "tracking" ? 91 :
         level.mission === "sling" ? 84 :
         level.mission === "rescue" || level.mission === "scout" || level.mission === "medical" ? 68 : 48;
       drawRoundedPanel(12, 104, objectiveWidth, objectiveHeight, 8,
@@ -2574,6 +3640,35 @@
         }
       }
 
+      if (level.mission === "tracking") {
+        const proximityWarning = trackingAnimal &&
+          (trackingAnimal.phase === "rising" || trackingAnimal.phase === "surfaced") &&
+          trackingAnimalDistance() < trackingAnimal.species.approachDistance * 1.35;
+        const activeState = !trackingAnimal ? "RETURN TO SHIP" :
+          trackingAnimal.phase === "surfaced" ?
+            (trackingAnimal.species.id === "penguin" ? "ON ICE — FIRE" : "SURFACED — FIRE") :
+            trackingAnimal.phase === "rising" ? "RISING" :
+              trackingAnimal.phase === "diving" ? "DIVING" : "UNDERWATER";
+        const dartState = trackingDart ? "DART IN FLIGHT" :
+          trackingDartsRemaining <= 0 ? "NO DARTS" :
+            trackingDartCooldown > 0 ? "RELOAD " + trackingDartCooldown.toFixed(1) + " s" : "DART READY";
+        ctx.fillStyle = proximityWarning ? "#ffb05f" :
+          trackingAnimal && trackingAnimal.phase === "surfaced" ? "#65e4b0" : "#b8dce8";
+        ctx.font = "bold 12px Trebuchet MS";
+        ctx.fillText(
+          activeState + "   ·   " + dartState + "   ·   " +
+            (proximityWarning ? "TOO CLOSE — BACK OFF" :
+              "DARTS " + trackingDartsRemaining + " / " + TRACKING_DARTS_TOTAL),
+          25, 165
+        );
+        ctx.fillStyle = "#9ed5d8";
+        ctx.font = "12px Trebuchet MS";
+        const progress = TRACKING_SPECIES.map((species, index) =>
+          species.label + " " + (index < trackingTagged ? "TAGGED" : index === trackingTagged ? "ACTIVE" : "WAITING")
+        ).join("   ·   ");
+        ctx.fillText(progress, 25, 183);
+      }
+
       if (missionNotice) {
         const noticeWidth = Math.min(480, viewWidth - 30);
         drawRoundedPanel(
@@ -2598,14 +3693,20 @@
         ctx.fillText("LANDED — " + helicopter.landedAt, viewWidth / 2, viewHeight - 30);
       }
 
-      ctx.textAlign = "right";
-      ctx.fillStyle = "rgba(230,244,245,0.8)";
-      ctx.font = "12px Trebuchet MS";
-      ctx.fillText(
-        "← → / A D  TILT     ↑ ↓ / W S  COLLECTIVE     SPACE LEVEL" +
-          (usesSlingLoad() ? "     E LOAD LINE" : ""),
-        viewWidth - 16, 28
-      );
+      if (viewWidth >= 760) {
+        ctx.textAlign = "right";
+        ctx.fillStyle = "rgba(230,244,245,0.8)";
+        ctx.font = "12px Trebuchet MS";
+        const dartRack = level.mission === "tracking" ? trackingDartRackBounds() : null;
+        const controlsRight = dartRack && dartRack.y === 12 ? dartRack.x - 12 : viewWidth - 16;
+        ctx.fillText(
+          "← → / A D  TILT     ↑ ↓ / W S  COLLECTIVE     SPACE LEVEL" +
+            (usesSlingLoad() ? "     E LOAD LINE" : "") +
+            (level.mission === "tracking" ? "     CLICK DART" : ""),
+          controlsRight, 28
+        );
+      }
+      drawTrackingDartRack();
     }
 
     function drawTitle() {
@@ -2626,11 +3727,11 @@
       ctx.fillText("POLAR PILOT", viewWidth / 2, y + 90);
       ctx.fillStyle = "#cde7e9";
       ctx.font = "bold 17px Trebuchet MS";
-      ctx.fillText("SEVEN ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
+      ctx.fillText("EIGHT ANTARCTIC MISSIONS", viewWidth / 2, y + 125);
 
       ctx.fillStyle = "#fff";
       ctx.font = "16px Trebuchet MS";
-      ctx.fillText("Scout ice, carry people and cargo, and deploy ocean probes", viewWidth / 2, y + 172);
+      ctx.fillText("Scout ice, support expeditions, survey the ocean, and track wildlife", viewWidth / 2, y + 172);
       ctx.fillStyle = "#9ed5d8";
       ctx.fillText("LEFT / RIGHT · A / D", viewWidth / 2 - 136, y + 215);
       ctx.fillText("UP / DOWN · W / S", viewWidth / 2 + 136, y + 215);
@@ -2645,7 +3746,7 @@
       ctx.fillText("PRESS SPACE TO FLY", viewWidth / 2, y + 310);
       ctx.fillStyle = "#9ed5d8";
       ctx.font = "bold 12px Trebuchet MS";
-      ctx.fillText("1-7: JUMP TO LEVEL", viewWidth / 2, y + 335);
+      ctx.fillText("1-8: JUMP TO LEVEL", viewWidth / 2, y + 335);
     }
 
     function drawBriefing() {
@@ -2662,6 +3763,8 @@
             "Wind pushes the aircraft east. Time your return landing to the moving deck." :
           level.mission === "xbt" ?
             "Hold a stable hover to deploy an XBT and obtain an oceanographic profile." :
+          level.mission === "tracking" ?
+            "You have eight darts. Use the red laser, allow for drop, and keep your distance." :
             "Follow the yellow objective chevron.",
         "PRESS SPACE TO BEGIN"
       );
@@ -2676,6 +3779,7 @@
       else if (level.mission === "medical") message = "The patient is aboard Nuyina and receiving treatment.";
       else if (level.mission === "summit") message = "The summit radio relay is installed and both engineers are safely back aboard.";
       else if (level.mission === "xbt") message = "Three XBT profiles are complete and the aircraft is safely back aboard Nuyina.";
+      else if (level.mission === "tracking") message = "The whale, seal, and penguin are tagged and the aircraft is safely back aboard Nuyina.";
       drawMissionPanel(
         "MISSION COMPLETE",
         message,
@@ -2687,7 +3791,7 @@
     function drawGameComplete() {
       drawMissionPanel(
         "TOUR COMPLETE",
-        "Ice scouted, people delivered, cargo moved, rescues completed, summit relay installed, and ocean profiles collected.",
+        "Ice scouted, people delivered, cargo moved, rescues completed, summit relay installed, ocean profiles collected, and wildlife tagged.",
         "Excellent flying.",
         "PRESS SPACE FOR TITLE"
       );
@@ -2765,10 +3869,10 @@
       const code = event.code;
       if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
            "KeyA", "KeyD", "KeyW", "KeyS", "KeyE", "KeyH", "Space",
-           "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7"].includes(code)) {
+           "Backslash", "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7", "Digit8"].includes(code)) {
         event.preventDefault();
       }
-      if (/^Digit[1-7]$/.test(code) && pressed && !event.repeat) {
+      if (/^Digit[1-8]$/.test(code) && pressed && !event.repeat) {
         startLevel(parseInt(code.slice(5), 10) - 1, false);
       } else if (code === "ArrowLeft" || code === "KeyA") input.left = pressed;
       else if (code === "ArrowRight" || code === "KeyD") input.right = pressed;
@@ -2776,6 +3880,9 @@
       else if (code === "ArrowDown" || code === "KeyS") input.down = pressed;
       else if (code === "KeyH" && pressed && !event.repeat && gameState === "playing") {
         setAutoHover(!autoHoverEnabled);
+      }
+      else if (code === "Backslash" && pressed && !event.repeat && gameState === "playing") {
+        triggerUfoFlyby();
       }
       else if (code === "KeyE" && pressed && !event.repeat) handleLoadKey();
       else if (code === "Space") {
@@ -2799,7 +3906,8 @@
 
     window.addEventListener("keydown", event => onKey(event, true), { passive: false });
     window.addEventListener("keyup", event => onKey(event, false), { passive: false });
-    canvas.addEventListener("pointermove", aimSpotlight, { passive: true });
+    canvas.addEventListener("pointermove", aimPointer, { passive: true });
+    canvas.addEventListener("pointerdown", handlePointerDown, { passive: false });
     window.addEventListener("blur", clearInput);
     window.addEventListener("resize", resizeCanvas);
 
@@ -3243,10 +4351,189 @@
       settleLanding(shipDeckSurface());
       result.xbtComplete = gameState === "levelComplete";
 
+      startLevel(7, true);
+      result.trackingStartsOnShip = helicopter.landed &&
+        helicopter.landedAt === SHIP_DECK.name && trackingTagged === 0 &&
+        trackingAnimal && trackingAnimal.species.id === "whale" &&
+        TRACKING_DARTS_TOTAL === 8 && trackingDartsRemaining === TRACKING_DARTS_TOTAL &&
+        drawTrackingDartRack() === TRACKING_DARTS_TOTAL;
+      result.trackingOpenOcean = isOpenOceanMission() && shipXOffset() === 0 &&
+        Math.abs(shipSwellOffset()) > 0.01 && Math.abs(shipDeckVelocity()) > 0.01;
+      const trackingWaveSamples = [0, 120, 240, 520, 850, 1190].map(waterSurfaceAt);
+      result.trackingSeasCalm = Math.max(...trackingWaveSamples.map(Math.abs)) <= 0.48;
+      result.trackingIceIsDecorative = !Number.isFinite(solidHeightAt(TRACKING_ICE_FLOES[0].x));
+      trackingAnimal.phaseTime = trackingAnimal.species.submergedTime;
+      updateTracking(FIXED_DT);
+      const trackingStartedRising = trackingAnimal.phase === "rising";
+      trackingAnimal.phaseTime = TRACKING_TRANSITION_TIME;
+      updateTracking(FIXED_DT);
+      result.trackingSurfaceCycle = trackingStartedRising && trackingAnimal.phase === "surfaced";
+
+      startLevel(7, true);
+      trackingAnimal.phase = "surfaced";
+      trackingAnimal.phaseTime = 0;
+      const spookTarget = trackingAnimalPosition(trackingAnimal);
+      setAirborne(spookTarget.x, spookTarget.y + 20, 0.55);
+      updateTracking(FIXED_DT);
+      result.trackingCloseApproachSpooks = trackingAnimal.phase === "diving" &&
+        trackingAnimal.spooked && missionNotice.indexOf("SPOOKED") >= 0;
+
+      startLevel(7, true);
+      const trackingCanvasRect = canvas.getBoundingClientRect();
+      let trackingPointerPrevented = false;
+      handlePointerDown({
+        button: 0,
+        clientX: trackingCanvasRect.left + trackingCanvasRect.width * 0.75,
+        clientY: trackingCanvasRect.top + trackingCanvasRect.height * 0.55,
+        preventDefault: function() { trackingPointerPrevented = true; },
+      });
+      result.trackingPointerFires = trackingPointerPrevented && !!trackingDart &&
+        pointerAimDistance >= 15 && pointerAimDistance <= DART_RANGE &&
+        trackingDartsRemaining === TRACKING_DARTS_TOTAL - 1;
+      result.trackingDartRackUpdates =
+        drawTrackingDartRack() === TRACKING_DARTS_TOTAL - 1;
+      result.trackingReticleDartsUpdate =
+        drawTrackingReticleAmmo(viewWidth * 0.75, viewHeight * 0.55, "#ffd65a") ===
+        TRACKING_DARTS_TOTAL - 1;
+
+      startLevel(7, true);
+      const underwaterPosition = trackingAnimalPosition(trackingAnimal);
+      setAirborne(underwaterPosition.x - 30, underwaterPosition.y + 20, 0.55);
+      aimPointerAt(underwaterPosition.x, underwaterPosition.y);
+      const underwaterDartFired = fireTrackingDart();
+      let trackingTestSteps = 0;
+      while (trackingDart && trackingTestSteps++ < 180) updateTrackingDart(FIXED_DT);
+      result.trackingUnderwaterMiss = underwaterDartFired && trackingTagged === 0 &&
+        !trackingDart && trackingSplashes.some(splash => splash.kind === "dart") &&
+        trackingDartsRemaining === TRACKING_DARTS_TOTAL - 1;
+
+      startLevel(7, true);
+      setAirborne(300, 30, 0.55);
+      aimPointerAt(600, helicopter.y - 1);
+      const firstDartFired = fireTrackingDart();
+      const heldDart = trackingDart;
+      const cooldownBlocksDart = !fireTrackingDart() && trackingDart === heldDart;
+      const initialDartVerticalSpeed = trackingDart.vy;
+      updateTrackingDart(0.1);
+      result.trackingDartBallistic = trackingDart && trackingDart.vy < initialDartVerticalSpeed;
+      updateTrackingDart((DART_RANGE + 1) / DART_SPEED);
+      result.trackingDartLimits = firstDartFired && cooldownBlocksDart &&
+        !trackingDart && trackingDartCooldown === 0;
+      result.trackingDartRetuned = DART_SPEED === 110;
+      const rifleShoulder = trackingRifleShoulderWorld();
+      const rifleMuzzle = trackingRifleMuzzleWorld();
+      result.trackingRifleAligned = Math.abs(
+        Math.hypot(rifleMuzzle.x - rifleShoulder.x, rifleMuzzle.y - rifleShoulder.y) - TRACKING_RIFLE_LENGTH
+      ) < 0.001 && Number.isFinite(trackingRifleLocalAngle());
+
+      startLevel(7, true);
+      setAirborne(300, 30, 0.55);
+      trackingDartsRemaining = 1;
+      aimPointerAt(600, helicopter.y - 1);
+      const lastTrackingDartFired = fireTrackingDart();
+      let lastTrackingDartSteps = 0;
+      while (trackingDart && lastTrackingDartSteps++ < 180) updateTrackingDart(FIXED_DT);
+      result.trackingDartExhaustion = lastTrackingDartFired &&
+        trackingDartsRemaining === 0 && gameState === "crashed" &&
+        crashReason.indexOf("Tracking darts depleted") === 0;
+
+      function tagCurrentTrackingAnimalForTest() {
+        trackingAnimal.phase = "surfaced";
+        trackingAnimal.phaseTime = 0;
+        const target = trackingAnimalPosition(trackingAnimal);
+        setAirborne(target.x - trackingAnimal.species.hitRadiusX - 3, target.y + 2, 0.55);
+        trackingDartCooldown = 0;
+        aimPointerAt(target.x, target.y);
+        fireTrackingDart();
+        let steps = 0;
+        while (trackingDart && steps++ < 180) updateTrackingDart(FIXED_DT);
+      }
+
+      startLevel(7, true);
+      result.trackingDartsReset = trackingDartsRemaining === TRACKING_DARTS_TOTAL;
+      settleLanding(shipDeckSurface());
+      result.trackingRequiresAllTags = gameState === "playing";
+      const firstTrackingObjective = activeObjective();
+      tagCurrentTrackingAnimalForTest();
+      result.trackingWhaleThenSeal = trackingTagged === 1 && trackingAnimal &&
+        trackingAnimal.species.id === "seal" && firstTrackingObjective.x !== activeObjective().x &&
+        trackingDepartingAnimals.length === 1 && trackingDepartingAnimals[0].phase === "taggedDiving";
+      const taggedWhaleAltitude = trackingAnimalPosition(trackingDepartingAnimals[0]).y;
+      updateTracking(0.5);
+      result.trackingTaggedAnimalDives = trackingDepartingAnimals.length === 1 &&
+        trackingAnimalPosition(trackingDepartingAnimals[0]).y < taggedWhaleAltitude;
+      tagCurrentTrackingAnimalForTest();
+      result.trackingSealThenPenguin = trackingTagged === 2 && trackingAnimal &&
+        trackingAnimal.species.id === "penguin" && trackingDepartingAnimals.length === 2;
+      const penguinSwimStartX = trackingAnimal.x;
+      const penguinSwimTargetX = trackingFloePosition(penguinTrackingFloe(trackingAnimal)).x;
+      const penguinStartDistance = Math.abs(penguinSwimTargetX - penguinSwimStartX);
+      updateTracking(1);
+      result.trackingPenguinSwimsBetweenFloes = penguinTrackingFloes().length >= 3 &&
+        trackingAnimal.species.submergedTime >= 10 && trackingAnimal.phase === "submerged" &&
+        Math.abs(penguinSwimTargetX - trackingAnimal.x) < penguinStartDistance;
+      trackingAnimal.phase = "surfaced";
+      trackingAnimal.phaseTime = 0;
+      const penguinFloePosition = trackingFloePosition(penguinTrackingFloe(trackingAnimal));
+      const surfacedPenguinPosition = trackingAnimalPosition(trackingAnimal);
+      result.trackingPenguinUsesFloe =
+        Math.abs(surfacedPenguinPosition.x - penguinFloePosition.x) < 0.001 &&
+        surfacedPenguinPosition.y > penguinFloePosition.topY;
+      drawWorld(0);
+      result.trackingCompositeRenders = true;
+      tagCurrentTrackingAnimalForTest();
+      result.trackingAllTagged = trackingTagged === TRACKING_SPECIES.length &&
+        !trackingAnimal && trackingDepartingAnimals.length === TRACKING_SPECIES.length &&
+        gameState === "playing" &&
+        trackingDartsRemaining === TRACKING_DARTS_TOTAL - TRACKING_SPECIES.length;
+      result.trackingRetargeted = Math.abs(
+        activeObjective().x - (SHIP_DECK.x1 + SHIP_DECK.x2) / 2
+      ) < 0.001;
+      helicopter.x = (SHIP_DECK.x1 + SHIP_DECK.x2) / 2;
+      settleLanding(shipDeckSurface());
+      result.trackingComplete = gameState === "levelComplete";
+      onKey(
+        { code: "Digit8", repeat: false, preventDefault: function() {} },
+        true
+      );
+      result.trackingLevelSkip =
+        levelIndex === 7 && level.mission === "tracking" && gameState === "briefing";
+
       startLevel(0, true);
       simulateFrames(20);
       result.nonMedicalDeckStatic = shipSwellOffset() === 0 &&
         shipDeckY() === SHIP_DECK_Y && shipDeckVelocity() === 0;
+
+      ufoFlyby = null;
+      let ufoKeyPrevented = false;
+      onKey({
+        code: "Backslash",
+        repeat: false,
+        preventDefault: function() { ufoKeyPrevented = true; },
+      }, true);
+      const manualUfoStart = ufoScreenPosition();
+      const firstUfoBrightness = ufoLightBrightness(2);
+      updateUfoFlyby(0.5, lastUfoQuarter * UFO_INTERVAL_MS + 1);
+      result.ufoBackslashTrigger = ufoKeyPrevented && manualUfoStart &&
+        (manualUfoStart.x < 0 || manualUfoStart.x > viewWidth) &&
+        manualUfoStart.y < worldToScreenY(helicopter.y);
+      result.ufoLightsPulse = Math.abs(ufoLightBrightness(2) - firstUfoBrightness) > 0.05;
+
+      const testQuarter = 500000;
+      ufoFlyby = null;
+      lastUfoQuarter = testQuarter;
+      updateUfoFlyby(0, (testQuarter + 1) * UFO_INTERVAL_MS + 1);
+      const scheduledUfoStart = ufoScreenPosition();
+      result.ufoQuarterSchedule = !!ufoFlyby && scheduledUfoStart &&
+        (scheduledUfoStart.x < 0 || scheduledUfoStart.x > viewWidth);
+      ufoFlyby.elapsed = UFO_FLYBY_DURATION / 2;
+      const scheduledUfoMiddle = ufoScreenPosition();
+      result.ufoCrossesAboveHelicopter = scheduledUfoMiddle.x > 0 &&
+        scheduledUfoMiddle.x < viewWidth &&
+        scheduledUfoMiddle.y < worldToScreenY(helicopter.y) && drawUfoFlyby();
+      updateUfoFlyby(UFO_FLYBY_DURATION, (testQuarter + 1) * UFO_INTERVAL_MS + 2);
+      result.ufoCompletesFlyby = !ufoFlyby;
+      lastUfoQuarter = Math.floor(Date.now() / UFO_INTERVAL_MS);
 
       result.pass = result.collectiveRaised === 35 &&
         result.collectivePersists &&
@@ -3337,7 +4624,39 @@
         result.xbtAbort &&
         result.xbtThreeCasts &&
         result.xbtComplete &&
-        result.nonMedicalDeckStatic;
+        result.trackingStartsOnShip &&
+        result.trackingOpenOcean &&
+        result.trackingSeasCalm &&
+        result.trackingIceIsDecorative &&
+        result.trackingSurfaceCycle &&
+        result.trackingCloseApproachSpooks &&
+        result.trackingPointerFires &&
+        result.trackingDartRackUpdates &&
+        result.trackingReticleDartsUpdate &&
+        result.trackingUnderwaterMiss &&
+        result.trackingDartBallistic &&
+        result.trackingDartLimits &&
+        result.trackingDartRetuned &&
+        result.trackingRifleAligned &&
+        result.trackingDartExhaustion &&
+        result.trackingDartsReset &&
+        result.trackingRequiresAllTags &&
+        result.trackingWhaleThenSeal &&
+        result.trackingTaggedAnimalDives &&
+        result.trackingSealThenPenguin &&
+        result.trackingPenguinSwimsBetweenFloes &&
+        result.trackingPenguinUsesFloe &&
+        result.trackingCompositeRenders &&
+        result.trackingAllTagged &&
+        result.trackingRetargeted &&
+        result.trackingComplete &&
+        result.trackingLevelSkip &&
+        result.nonMedicalDeckStatic &&
+        result.ufoBackslashTrigger &&
+        result.ufoLightsPulse &&
+        result.ufoQuarterSchedule &&
+        result.ufoCrossesAboveHelicopter &&
+        result.ufoCompletesFlyby;
 
       resetGame(false);
       const report = document.createElement("div");
@@ -3351,7 +4670,7 @@
     resetGame(false);
     if (location.hash === "#test") runSelfTests();
     else {
-      const playHash = /^#play([1-6])$/.exec(location.hash);
+      const playHash = /^#play([1-8])$/.exec(location.hash);
       if (playHash) startLevel(parseInt(playHash[1], 10) - 1, true);
       requestAnimationFrame(frame);
     }
